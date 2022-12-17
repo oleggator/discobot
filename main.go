@@ -83,7 +83,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 // playSound plays the current buffer to the provided channel.
-func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
+func playSound(s *discordgo.Session, guildID, channelID string) error {
 	client := youtube.Client{
 		Debug:      false,
 		HTTPClient: http.DefaultClient,
@@ -91,7 +91,7 @@ func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
 
 	video, err := client.GetVideoContext(context.Background(), nggyu)
 	if err != nil {
-		log.Fatalln(err)
+		return err
 	}
 	formats := video.Formats.WithAudioChannels().Type("opus")
 	//log.Println(formats)
@@ -99,7 +99,7 @@ func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
 
 	reader, n, err := client.GetStreamContext(context.Background(), video, format)
 	if err != nil {
-		log.Fatalln(err)
+		return err
 	}
 
 	bar := progressbar.DefaultBytes(n)
@@ -107,7 +107,7 @@ func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, &barReader); err != nil {
-		log.Fatalln(err)
+		return err
 	}
 
 	// Join the provided voice channel.
@@ -125,7 +125,7 @@ func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
 	var w webm.WebM
 	r, err := webm.Parse(bytes.NewReader(buf.Bytes()), &w)
 	if err != nil {
-		log.Fatalln(err)
+		return err
 	}
 
 loop:
