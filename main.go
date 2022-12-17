@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -20,8 +19,6 @@ import (
 	"discobot/webm"
 )
 
-const nggyu = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-
 var token = os.Getenv("TOKEN")
 
 func main() {
@@ -31,8 +28,10 @@ func main() {
 	}
 	defer dg.Close()
 
-	dg.AddHandler(messageCreate)
+	dg.AddHandler(guildCreate)
 	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildVoiceStates
+
+	dg.AddHandler(handleInteractionCreate)
 
 	err = dg.Open()
 	if err != nil {
@@ -45,53 +44,14 @@ func main() {
 	<-sc
 }
 
-// This function will be called (due to AddHandler above) every time a new
-// message is created on any channel that the autenticated bot has access to.
-func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Ignore all messages created by the bot itself
-	// This isn't required in this specific example, but it's a good practice.
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
-
-	// check if the message is "!airhorn"
-	if strings.HasPrefix(m.Content, "!rickroll") {
-		// Find the channel that the message came from.
-		c, err := s.State.Channel(m.ChannelID)
-		if err != nil {
-			// Could not find channel.
-			return
-		}
-
-		// Find the guild for that channel.
-		g, err := s.State.Guild(c.GuildID)
-		if err != nil {
-			// Could not find guild.
-			return
-		}
-
-		// Look for the message sender in that guild's current voice states.
-		for _, vs := range g.VoiceStates {
-			if vs.UserID == m.Author.ID {
-				err = playSound(s, g.ID, vs.ChannelID)
-				if err != nil {
-					fmt.Println("Error playing sound:", err)
-				}
-
-				return
-			}
-		}
-	}
-}
-
 // playSound plays the current buffer to the provided channel.
-func playSound(s *discordgo.Session, guildID, channelID string) error {
+func playSound(s *discordgo.Session, guildID, channelID, url string) error {
 	client := youtube.Client{
 		Debug:      false,
 		HTTPClient: http.DefaultClient,
 	}
 
-	video, err := client.GetVideoContext(context.Background(), nggyu)
+	video, err := client.GetVideoContext(context.Background(), url)
 	if err != nil {
 		return err
 	}
@@ -136,10 +96,16 @@ loop:
 	for {
 		timeout := time.NewTimer(5 * time.Second)
 		select {
-		case packet := <-r.Chan:
+		case packet, ok := <-r.Chan:
+			if !ok {
+				log.Println("chan closed")
+				break loop
+			}
+
 			vc.OpusSend <- packet.Data
 			_ = bar.Add(len(packet.Data))
 		case <-timeout.C:
+			log.Println("timeout")
 			break loop
 		}
 	}
@@ -154,4 +120,33 @@ loop:
 	vc.Disconnect()
 
 	return nil
+}
+
+func guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
+	if event.Guild.Unavailable {
+		return
+	}
+
+	appID := s.State.User.ID
+	guildID := event.Guild.ID
+
+	cmds, err := s.ApplicationCommandBulkOverwrite(appID, guildID, commands)
+	if err != nil {
+		log.Println(err)
+	}
+
+	s.AddHandlerOnce(func(s *discordgo.Session, event *discordgo.Disconnect) {
+		for _, cmd := range cmds {
+			err := s.ApplicationCommandDelete(appID, guildID, cmd.ID)
+			if err != nil {
+				log.Fatalf("Cannot delete %q command: %v", cmd.Name, err)
+			}
+		}
+	})
+}
+
+func handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if handler, ok := commandHandlers[i.ApplicationCommandData().Name]; ok {
+		handler(s, i)
+	}
 }
