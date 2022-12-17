@@ -18,8 +18,9 @@ import (
 	"time"
 )
 
-const token = ""
 const nggyu = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+var token = os.Getenv("TOKEN")
 
 func main() {
 	dg, err := discordgo.New("Bot " + token)
@@ -33,10 +34,10 @@ func main() {
 
 	err = dg.Open()
 	if err != nil {
-		fmt.Println("Error opening Discord session: ", err)
+		log.Fatalln(err)
 	}
 
-	fmt.Println("Airhorn is now running.  Press CTRL-C to exit.")
+	fmt.Println("Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
