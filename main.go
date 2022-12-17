@@ -90,7 +90,11 @@ func playSound(s *discordgo.Session, guildID, channelID, url string) error {
 		return err
 	}
 
-	bar = progressbar.NewOptions(-1, progressbar.OptionShowBytes(true))
+	bar = progressbar.NewOptions(int(w.Duration/1_000),
+		progressbar.OptionFullWidth(),
+		progressbar.OptionSetElapsedTime(false),
+		progressbar.OptionSetPredictTime(false),
+	)
 	defer bar.Close()
 loop:
 	for {
@@ -103,7 +107,7 @@ loop:
 			}
 
 			vc.OpusSend <- packet.Data
-			_ = bar.Add(len(packet.Data))
+			bar.Set(int(packet.Timecode.Seconds()))
 		case <-timeout.C:
 			log.Println("timeout")
 			break loop
