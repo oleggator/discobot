@@ -65,7 +65,7 @@ func playSound(s *discordgo.Session, guildID, channelID, url string) error {
 
 	bar := progressbar.DefaultBytes(n)
 	barReader := progressbar.NewReader(reader, bar)
-	bufReader := bufferedreadseeker.NewReader(&barReader)
+	bufReader := bufferedreadseeker.NewReaderWithSize(&barReader, int(n))
 
 	// Join the provided voice channel.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
@@ -83,7 +83,6 @@ func playSound(s *discordgo.Session, guildID, channelID, url string) error {
 	if err != nil {
 		return err
 	}
-
 	for packet := range r.Chan {
 		if packet.Timecode == webm.BadTC {
 			r.Shutdown()

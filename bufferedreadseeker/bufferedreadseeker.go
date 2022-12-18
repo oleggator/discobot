@@ -5,6 +5,10 @@ import (
 	"io"
 )
 
+const (
+	defaultBufSize = 4096
+)
+
 // Reader implements buffering for an io.Reader object.
 type Reader struct {
 	buf    []byte
@@ -16,8 +20,12 @@ type Reader struct {
 var _ io.ReadSeeker = &Reader{}
 
 func NewReader(rd io.Reader) *Reader {
+	return NewReaderWithSize(rd, defaultBufSize)
+}
+
+func NewReaderWithSize(rd io.Reader, n int) *Reader {
 	return &Reader{
-		buf:    []byte{},
+		buf:    make([]byte, 0, n),
 		rd:     rd,
 		offset: 0,
 		err:    nil,
@@ -49,18 +57,9 @@ func (b *Reader) Read(out []byte) (n int, err error) {
 		return n, nil
 	}
 
-	b.grow(len(out) - remainingData)
-	oldBufLen := bufLen
-	bufLen = len(b.buf)
-
-	n, b.err = b.rd.Read(b.buf[oldBufLen:])
-	if n < 0 {
-		panic(errNegativeRead)
+	if _, err := b.fetchNewData(len(out) - remainingData); err != nil {
+		return 0, err
 	}
-	if n == 0 {
-		return 0, b.readErr()
-	}
-	b.buf = b.buf[:oldBufLen+n]
 
 	n = copy(out, b.buf[b.offset:])
 	b.offset += n
@@ -80,18 +79,9 @@ func (b *Reader) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	if newOffset > len(b.buf) {
-		oldBufLen := len(b.buf)
-		b.grow(newOffset - len(b.buf))
-
-		var n int
-		n, b.err = b.rd.Read(b.buf[oldBufLen:])
-		if n < 0 {
-			panic(errNegativeRead)
+		if _, err := b.fetchNewData(newOffset - len(b.buf)); err != nil {
+			return 0, err
 		}
-		if n == 0 {
-			return 0, b.readErr()
-		}
-		b.buf = b.buf[:oldBufLen+n]
 	}
 
 	b.offset = newOffset
@@ -99,8 +89,32 @@ func (b *Reader) Seek(offset int64, whence int) (int64, error) {
 	return int64(b.offset), nil
 }
 
-func (b *Reader) grow(n int) {
-	newBuf := make([]byte, len(b.buf)+n)
+func (b *Reader) grow(n int) int {
+	l := len(b.buf)
+	if n <= cap(b.buf)-l {
+		b.buf = b.buf[:l+n]
+		return l
+	}
+
+	newBuf := make([]byte, l+n)
 	copy(newBuf, b.buf)
 	b.buf = newBuf
+	return l
+}
+
+func (b *Reader) fetchNewData(size int) (int, error) {
+	oldBufLen := len(b.buf)
+	b.grow(size)
+
+	var n int
+	n, b.err = b.rd.Read(b.buf[oldBufLen:])
+	if n < 0 {
+		panic(errNegativeRead)
+	}
+	if n == 0 {
+		return 0, b.readErr()
+	}
+	b.buf = b.buf[:oldBufLen+n]
+
+	return n, nil
 }
