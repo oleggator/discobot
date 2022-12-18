@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"discobot/bufferedreadseeker"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,10 +11,11 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/ebml-go/webm"
 	"github.com/kkdai/youtube/v2"
 	"github.com/schollz/progressbar/v3"
 
-	"discobot/webm"
+	"discobot/bufferedreadseeker"
 )
 
 var token = os.Getenv("TOKEN")
@@ -79,26 +79,16 @@ func playSound(s *discordgo.Session, guildID, channelID, url string) error {
 	// Start speaking.
 	vc.Speaking(true)
 
-	var w webm.WebM
-	r, err := webm.Parse(bufReader, &w)
+	r, err := webm.Parse(bufReader, &webm.WebM{})
 	if err != nil {
 		return err
 	}
 
-loop:
-	for {
-		timeout := time.NewTimer(5 * time.Second)
-		select {
-		case packet, ok := <-r.Chan:
-			if !ok {
-				log.Println("chan closed")
-				break loop
-			}
-
+	for packet := range r.Chan {
+		if packet.Timecode == webm.BadTC {
+			r.Shutdown()
+		} else {
 			vc.OpusSend <- packet.Data
-		case <-timeout.C:
-			log.Println("timeout")
-			break loop
 		}
 	}
 
