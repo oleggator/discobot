@@ -1,10 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"discobot/bufferedreadseeker"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -66,11 +65,7 @@ func playSound(s *discordgo.Session, guildID, channelID, url string) error {
 
 	bar := progressbar.DefaultBytes(n)
 	barReader := progressbar.NewReader(reader, bar)
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, &barReader); err != nil {
-		return err
-	}
+	bufReader := bufferedreadseeker.NewReader(&barReader)
 
 	// Join the provided voice channel.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
@@ -85,17 +80,11 @@ func playSound(s *discordgo.Session, guildID, channelID, url string) error {
 	vc.Speaking(true)
 
 	var w webm.WebM
-	r, err := webm.Parse(bytes.NewReader(buf.Bytes()), &w)
+	r, err := webm.Parse(bufReader, &w)
 	if err != nil {
 		return err
 	}
 
-	bar = progressbar.NewOptions(int(w.Duration/1_000),
-		progressbar.OptionFullWidth(),
-		progressbar.OptionSetElapsedTime(false),
-		progressbar.OptionSetPredictTime(false),
-	)
-	defer bar.Close()
 loop:
 	for {
 		timeout := time.NewTimer(5 * time.Second)
@@ -107,7 +96,6 @@ loop:
 			}
 
 			vc.OpusSend <- packet.Data
-			bar.Set(int(packet.Timecode.Seconds()))
 		case <-timeout.C:
 			log.Println("timeout")
 			break loop
