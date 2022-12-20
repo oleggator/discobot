@@ -92,8 +92,9 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 		} else {
 			if bot.PlayStatus {
 				vc.OpusSend <- packet.Data
+			} else {
+				<-bot.StartPlayback
 			}
-			<-bot.StartPlayback
 		}
 	}
 
@@ -163,10 +164,10 @@ func (bot *DiscoBot) handleInteractionCreate(s *discordgo.Session, i *discordgo.
 		bot.PlayStatus = true
 		bot.handleDisco(s, i)
 	case "disco-play":
-		bot.PlayStatus = !bot.PlayStatus
+		bot.PlayStatus = true
 		bot.StartPlayback <- struct{}{}
 	case "disco-pause":
-		bot.PlayStatus = !bot.PlayStatus
+		bot.PlayStatus = false
 	}
 }
 
