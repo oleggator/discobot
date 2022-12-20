@@ -28,7 +28,8 @@ func NewDiscoBot(token string) (*DiscoBot, error) {
 	}
 
 	bot := &DiscoBot{
-		api: dg,
+		api:           dg,
+		StartPlayback: make(chan struct{}),
 	}
 
 	dg.AddHandler(bot.guildCreate)
@@ -159,26 +160,30 @@ func (bot *DiscoBot) guildCreate(s *discordgo.Session, event *discordgo.GuildCre
 }
 
 func (bot *DiscoBot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	var err error
+
 	switch i.ApplicationCommandData().Name {
 	case "disco":
-		bot.PlayStatus = true
-		bot.handleDisco(s, i)
+		err = bot.handleDisco(s, i)
 	case "disco-play":
-		bot.PlayStatus = true
-		bot.StartPlayback <- struct{}{}
+		err = bot.handlePlay(s, i)
 	case "disco-pause":
-		bot.PlayStatus = false
+		err = bot.handlePause(s, i)
+	}
+
+	if err != nil {
+		log.Println(err)
 	}
 }
 
-func (bot *DiscoBot) handleDisco(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (bot *DiscoBot) handleDisco(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
 		// Find the channel that the message came from.
 		c, err := s.State.Channel(i.ChannelID)
 		if err != nil {
 			// Could not find channel.
-			return
+			return err
 		}
 
 		data := i.ApplicationCommandData()
@@ -189,39 +194,69 @@ func (bot *DiscoBot) handleDisco(s *discordgo.Session, i *discordgo.InteractionC
 			Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("Playing %q...", data.Options[0].StringValue())},
 		})
 		if err != nil {
-			log.Println(err)
-			return
+			return err
 		}
 
 		// Find the guild for that channel.
 		g, err := s.State.Guild(c.GuildID)
 		if err != nil {
 			// Could not find guild.
-			return
+			return err
 		}
 
 		// Look for the message sender in that guild's current voice states.
 		for _, vs := range g.VoiceStates {
 			if vs.UserID == i.Member.User.ID {
+				bot.PlayStatus = true
 				err = bot.playSound(s, g.ID, vs.ChannelID, url)
 				if err != nil {
-					fmt.Println("Error playing sound:", err)
+					return fmt.Errorf("error playing sound: %w", err)
 				}
 
-				return
+				return nil
 			}
 		}
 	case discordgo.InteractionApplicationCommandAutocomplete:
-		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
 			Data: &discordgo.InteractionResponseData{Choices: []*discordgo.ApplicationCommandOptionChoice{
 				{Name: "Rick Astley", Value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
 				{Name: "Short video", Value: "https://www.youtube.com/watch?v=LQxwqsoxXQI"},
 			}},
 		})
-		if err != nil {
-			log.Println(err)
-			return
-		}
 	}
+
+	return nil
+}
+
+func (bot *DiscoBot) handlePause(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return nil
+	}
+
+	bot.PlayStatus = false
+
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: "Paused..."},
+	})
+}
+
+func (bot *DiscoBot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return nil
+	}
+
+	bot.PlayStatus = true
+	//bot.StartPlayback <- struct{}{}
+	select {
+	case bot.StartPlayback <- struct{}{}:
+	default:
+		// skip if nobody is waiting
+	}
+
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("Playing...")},
+	})
 }
