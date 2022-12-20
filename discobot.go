@@ -7,8 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"discobot/bufferedreadseeker"
-
+	"discobot/filebufferedreadseeker"
 	"github.com/bwmarrin/discordgo"
 	"github.com/ebml-go/webm"
 	"github.com/kkdai/youtube/v2"
@@ -69,7 +68,15 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 
 	bar := progressbar.DefaultBytes(n)
 	barReader := progressbar.NewReader(reader, bar)
-	bufReader := bufferedreadseeker.NewReaderWithSize(&barReader, int(n))
+	bufReader, err := filebufferedreadseeker.NewReader(&barReader)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := bufReader.Close(); err != nil {
+			panic(err)
+		}
+	}()
 
 	// Join the provided voice channel.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
