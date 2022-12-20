@@ -16,8 +16,9 @@ import (
 )
 
 type DiscoBot struct {
-	api        *discordgo.Session
-	Playstatus bool
+	api           *discordgo.Session
+	PlayStatus    bool
+	StartPlayback chan struct{}
 }
 
 func NewDiscoBot(token string) (*DiscoBot, error) {
@@ -89,9 +90,10 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 		if packet.Timecode == webm.BadTC {
 			r.Shutdown()
 		} else {
-			if bot.Playstatus {
+			if bot.PlayStatus {
 				vc.OpusSend <- packet.Data
 			}
+			<-bot.StartPlayback
 		}
 	}
 
@@ -158,12 +160,13 @@ func (bot *DiscoBot) guildCreate(s *discordgo.Session, event *discordgo.GuildCre
 func (bot *DiscoBot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch i.ApplicationCommandData().Name {
 	case "disco":
-		bot.Playstatus = true
+		bot.PlayStatus = true
 		bot.handleDisco(s, i)
 	case "disco-play":
-		bot.Playstatus = !bot.Playstatus
+		bot.PlayStatus = !bot.PlayStatus
+		bot.StartPlayback <- struct{}{}
 	case "disco-pause":
-		bot.Playstatus = !bot.Playstatus
+		bot.PlayStatus = !bot.PlayStatus
 	}
 }
 
