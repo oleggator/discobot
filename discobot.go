@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"discobot/bufferedreadseeker"
+
 	"github.com/bwmarrin/discordgo"
 	"github.com/ebml-go/webm"
 	"github.com/kkdai/youtube/v2"
@@ -15,7 +16,9 @@ import (
 )
 
 type DiscoBot struct {
-	api *discordgo.Session
+	api           *discordgo.Session
+	PlayStatus    bool
+	StartPlayback chan struct{}
 }
 
 func NewDiscoBot(token string) (*DiscoBot, error) {
@@ -87,7 +90,11 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 		if packet.Timecode == webm.BadTC {
 			r.Shutdown()
 		} else {
-			vc.OpusSend <- packet.Data
+			if bot.PlayStatus {
+				vc.OpusSend <- packet.Data
+			} else {
+				<-bot.StartPlayback
+			}
 		}
 	}
 
@@ -126,6 +133,16 @@ func (bot *DiscoBot) guildCreate(s *discordgo.Session, event *discordgo.GuildCre
 				},
 			},
 		},
+		{
+			Name:        "disco-play",
+			Description: "Pause current song",
+			Type:        discordgo.ChatApplicationCommand,
+		},
+		{
+			Name:        "disco-pause",
+			Description: "Pause current song",
+			Type:        discordgo.ChatApplicationCommand,
+		},
 	})
 	if err != nil {
 		log.Println(err)
@@ -144,7 +161,13 @@ func (bot *DiscoBot) guildCreate(s *discordgo.Session, event *discordgo.GuildCre
 func (bot *DiscoBot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch i.ApplicationCommandData().Name {
 	case "disco":
+		bot.PlayStatus = true
 		bot.handleDisco(s, i)
+	case "disco-play":
+		bot.PlayStatus = true
+		bot.StartPlayback <- struct{}{}
+	case "disco-pause":
+		bot.PlayStatus = false
 	}
 }
 
