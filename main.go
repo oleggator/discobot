@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -19,6 +20,12 @@ func main() {
 		log.Fatalln(err)
 	}
 	defer bot.Close()
+
+	go func() {
+		if err := bot.RunPlayer(context.Background()); err != nil {
+			log.Println(err)
+		}
+	}()
 
 	fmt.Println("Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
