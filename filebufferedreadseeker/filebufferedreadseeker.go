@@ -113,7 +113,7 @@ func (b *Reader) Seek(offset int64, whence int) (int64, error) {
 	buf := make([]byte, dataToFetch)
 
 	var n int
-	n, b.err = b.rd.Read(buf)
+	n, b.err = io.ReadFull(b.rd, buf)
 	if n < 0 {
 		panic(errNegativeRead)
 	}
