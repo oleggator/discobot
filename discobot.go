@@ -1,18 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
-	"discobot/bufferedreadseeker"
-
+	"github.com/at-wat/ebml-go"
+	"github.com/at-wat/ebml-go/webm"
 	"github.com/bwmarrin/discordgo"
-	"github.com/ebml-go/webm"
 	"github.com/kkdai/youtube/v2"
-	"github.com/schollz/progressbar/v3"
 )
 
 type DiscoBot struct {
@@ -47,6 +47,19 @@ func (bot *DiscoBot) Close() error {
 	return bot.api.Close()
 }
 
+type Segment struct {
+	SeekHead *webm.SeekHead    `ebml:"SeekHead"`
+	Info     webm.Info         `ebml:"Info"`
+	Tracks   webm.Tracks       `ebml:"Tracks"`
+	Cluster  chan webm.Cluster `ebml:"Cluster"`
+	Cues     *webm.Cues        `ebml:"Cues"`
+}
+
+type Container struct {
+	Header  webm.EBMLHeader `ebml:"EBML"`
+	Segment Segment         `ebml:"Segment"`
+}
+
 // playSound plays the current buffer to the provided channel.
 func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url string) error {
 	client := youtube.Client{
@@ -62,14 +75,10 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 	//log.Println(formats)
 	format := &formats[0]
 
-	reader, n, err := client.GetStreamContext(context.Background(), video, format)
+	reader, _, err := client.GetStreamContext(context.Background(), video, format)
 	if err != nil {
 		return err
 	}
-
-	bar := progressbar.DefaultBytes(n)
-	barReader := progressbar.NewReader(reader, bar)
-	bufReader := bufferedreadseeker.NewReaderWithSize(&barReader, int(n))
 
 	// Join the provided voice channel.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
@@ -83,21 +92,38 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 	// Start speaking.
 	vc.Speaking(true)
 
-	r, err := webm.Parse(bufReader, &webm.WebM{})
-	if err != nil {
-		return err
-	}
-	for packet := range r.Chan {
-		if packet.Timecode == webm.BadTC {
-			r.Shutdown()
-		} else {
-			if bot.PlayStatus {
-				vc.OpusSend <- packet.Data
-			} else {
-				<-bot.StartPlayback
+	// cluster's size is usually below about 175 000 bytes
+	clusterChan := make(chan webm.Cluster, 32)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func(clusterChan <-chan webm.Cluster) {
+		defer wg.Done()
+		for cluster := range clusterChan {
+			for _, block := range cluster.SimpleBlock {
+				for _, data := range block.Data {
+					if bot.PlayStatus {
+						vc.OpusSend <- data
+					} else {
+						<-bot.StartPlayback
+					}
+				}
 			}
 		}
+	}(clusterChan)
+
+	var container Container
+	container.Segment.Cluster = clusterChan
+
+	bufReader := bufio.NewReader(reader)
+	err = ebml.Unmarshal(bufReader, &container)
+	close(clusterChan)
+	if err != nil {
+		return fmt.Errorf("unmarshal error: %w", err)
 	}
+
+	wg.Wait()
 
 	// Stop speaking
 	vc.Speaking(false)
