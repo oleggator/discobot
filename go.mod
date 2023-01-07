@@ -4,7 +4,6 @@ go 1.19
 
 require (
 	github.com/bwmarrin/discordgo v0.26.1
-	github.com/ebml-go/webm v0.0.0-20221117133942-84fa5245cf70
 	github.com/kkdai/youtube/v2 v2.7.18
 	github.com/schollz/progressbar/v3 v3.12.2
 )

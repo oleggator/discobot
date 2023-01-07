@@ -1,16 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"discobot/ebml"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
-	"discobot/bufferedreadseeker"
-
 	"github.com/bwmarrin/discordgo"
-	"github.com/ebml-go/webm"
 	"github.com/kkdai/youtube/v2"
 	"github.com/schollz/progressbar/v3"
 )
@@ -68,8 +67,8 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 	}
 
 	bar := progressbar.DefaultBytes(n)
-	barReader := progressbar.NewReader(reader, bar)
-	bufReader := bufferedreadseeker.NewReaderWithSize(&barReader, int(n))
+	bufReader := bufio.NewReaderSize(reader, 4*1024)
+	barReader := progressbar.NewReader(bufReader, bar)
 
 	// Join the provided voice channel.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
@@ -83,19 +82,62 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 	// Start speaking.
 	vc.Speaking(true)
 
-	r, err := webm.Parse(bufReader, &webm.WebM{})
-	if err != nil {
-		return err
-	}
-	for packet := range r.Chan {
-		if packet.Timecode == webm.BadTC {
-			r.Shutdown()
-		} else {
+	samples := make([][]byte, 0)
+
+	//samples := make(chan []byte, 256)
+	//go func(samples chan []byte) {
+	//	for sample := range samples {
+	//		if bot.PlayStatus {
+	//			vc.OpusSend <- sample
+	//		} else {
+	//			<-bot.StartPlayback
+	//		}
+	//	}
+	//}(samples)
+
+	if err := ebml.ReadElements(&barReader, func(element *ebml.Element) {
+		if element.Type != ebml.ElementSimpleBlock {
+			return
+		}
+
+		block := element.Value.(ebml.Block)
+		if block.Discardable {
+			log.Println("discardable:", block.Discardable)
+		}
+
+		if block.Invisible {
+			log.Println("invisible:", block.Invisible)
+		}
+
+		if !block.Keyframe {
+			log.Println("keyframe:", block.Keyframe)
+		}
+
+		if len(block.Data) != 1 {
+			log.Println(block.Data)
+		}
+		for _, data := range block.Data {
 			if bot.PlayStatus {
-				vc.OpusSend <- packet.Data
+				//select {
+				//case samples <- data:
+				//default:
+				//	time.Sleep(time.Second)
+				//}
+				samples = append(samples, data)
 			} else {
 				<-bot.StartPlayback
 			}
+		}
+	}); err != nil {
+		return err
+	}
+	//close(samples)
+
+	for _, sample := range samples {
+		if bot.PlayStatus {
+			vc.OpusSend <- sample
+		} else {
+			<-bot.StartPlayback
 		}
 	}
 
