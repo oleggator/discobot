@@ -51,8 +51,8 @@ type Segment struct {
 	SeekHead *webm.SeekHead    `ebml:"SeekHead"`
 	Info     webm.Info         `ebml:"Info"`
 	Tracks   webm.Tracks       `ebml:"Tracks"`
-	Cluster  chan webm.Cluster `ebml:"Cluster"`
 	Cues     *webm.Cues        `ebml:"Cues"`
+	Cluster  chan webm.Cluster `ebml:"Cluster"`
 }
 
 type Container struct {
