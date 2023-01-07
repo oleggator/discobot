@@ -11,5 +11,9 @@ RUN CGO_ENABLED=0 go build -o /usr/bin/discobot discobot
 
 FROM alpine:3.17
 
+LABEL org.opencontainers.image.source=https://github.com/oleggator/discobot
+LABEL org.opencontainers.image.description="discobot"
+LABEL org.opencontainers.image.licenses=MIT
+
 COPY --from=build /usr/bin/discobot /usr/bin/discobot
 CMD ["/usr/bin/discobot"]
