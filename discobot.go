@@ -3,15 +3,16 @@ package main
 import (
 	"bufio"
 	"context"
-	"discobot/ebml"
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/at-wat/ebml-go"
+	"github.com/at-wat/ebml-go/webm"
 	"github.com/bwmarrin/discordgo"
 	"github.com/kkdai/youtube/v2"
-	"github.com/schollz/progressbar/v3"
 )
 
 type DiscoBot struct {
@@ -46,6 +47,19 @@ func (bot *DiscoBot) Close() error {
 	return bot.api.Close()
 }
 
+type Segment struct {
+	SeekHead *webm.SeekHead    `ebml:"SeekHead"`
+	Info     webm.Info         `ebml:"Info"`
+	Tracks   webm.Tracks       `ebml:"Tracks"`
+	Cluster  chan webm.Cluster `ebml:"Cluster"`
+	Cues     *webm.Cues        `ebml:"Cues"`
+}
+
+type Container struct {
+	Header  webm.EBMLHeader `ebml:"EBML"`
+	Segment Segment         `ebml:"Segment"`
+}
+
 // playSound plays the current buffer to the provided channel.
 func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url string) error {
 	client := youtube.Client{
@@ -61,14 +75,10 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 	//log.Println(formats)
 	format := &formats[0]
 
-	reader, n, err := client.GetStreamContext(context.Background(), video, format)
+	reader, _, err := client.GetStreamContext(context.Background(), video, format)
 	if err != nil {
 		return err
 	}
-
-	bar := progressbar.DefaultBytes(n)
-	bufReader := bufio.NewReaderSize(reader, 4*1024)
-	barReader := progressbar.NewReader(bufReader, bar)
 
 	// Join the provided voice channel.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
@@ -82,64 +92,38 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 	// Start speaking.
 	vc.Speaking(true)
 
-	samples := make([][]byte, 0)
+	// cluster's size is usually below about 175 000 bytes
+	clusterChan := make(chan webm.Cluster, 32)
 
-	//samples := make(chan []byte, 256)
-	//go func(samples chan []byte) {
-	//	for sample := range samples {
-	//		if bot.PlayStatus {
-	//			vc.OpusSend <- sample
-	//		} else {
-	//			<-bot.StartPlayback
-	//		}
-	//	}
-	//}(samples)
+	var wg sync.WaitGroup
+	wg.Add(1)
 
-	if err := ebml.ReadElements(&barReader, func(element *ebml.Element) {
-		if element.Type != ebml.ElementSimpleBlock {
-			return
-		}
-
-		block := element.Value.(ebml.Block)
-		if block.Discardable {
-			log.Println("discardable:", block.Discardable)
-		}
-
-		if block.Invisible {
-			log.Println("invisible:", block.Invisible)
-		}
-
-		if !block.Keyframe {
-			log.Println("keyframe:", block.Keyframe)
-		}
-
-		if len(block.Data) != 1 {
-			log.Println(block.Data)
-		}
-		for _, data := range block.Data {
-			if bot.PlayStatus {
-				//select {
-				//case samples <- data:
-				//default:
-				//	time.Sleep(time.Second)
-				//}
-				samples = append(samples, data)
-			} else {
-				<-bot.StartPlayback
+	go func(clusterChan <-chan webm.Cluster) {
+		defer wg.Done()
+		for cluster := range clusterChan {
+			for _, block := range cluster.SimpleBlock {
+				for _, data := range block.Data {
+					if bot.PlayStatus {
+						vc.OpusSend <- data
+					} else {
+						<-bot.StartPlayback
+					}
+				}
 			}
 		}
-	}); err != nil {
-		return err
-	}
-	//close(samples)
+	}(clusterChan)
 
-	for _, sample := range samples {
-		if bot.PlayStatus {
-			vc.OpusSend <- sample
-		} else {
-			<-bot.StartPlayback
-		}
+	var container Container
+	container.Segment.Cluster = clusterChan
+
+	bufReader := bufio.NewReader(reader)
+	err = ebml.Unmarshal(bufReader, &container)
+	close(clusterChan)
+	if err != nil {
+		return fmt.Errorf("unmarshal error: %w", err)
 	}
+
+	wg.Wait()
 
 	// Stop speaking
 	vc.Speaking(false)
