@@ -16,9 +16,18 @@ import (
 )
 
 type DiscoBot struct {
-	api           *discordgo.Session
-	PlayStatus    bool
-	StartPlayback chan struct{}
+	api        *discordgo.Session
+	youtubeAPI youtube.Client
+
+	playStatus    bool
+	startPlayback chan struct{}
+
+	playQueue chan *Task
+}
+
+type Task struct {
+	video              *youtube.Video
+	guildID, channelID string
 }
 
 func NewDiscoBot(token string) (*DiscoBot, error) {
@@ -28,8 +37,14 @@ func NewDiscoBot(token string) (*DiscoBot, error) {
 	}
 
 	bot := &DiscoBot{
-		api:           dg,
-		StartPlayback: make(chan struct{}),
+		api: dg,
+		youtubeAPI: youtube.Client{
+			Debug:      false,
+			HTTPClient: http.DefaultClient,
+		},
+		playStatus:    false,
+		startPlayback: make(chan struct{}),
+		playQueue:     make(chan *Task),
 	}
 
 	dg.AddHandler(bot.guildCreate)
@@ -47,6 +62,28 @@ func (bot *DiscoBot) Close() error {
 	return bot.api.Close()
 }
 
+func (bot *DiscoBot) queueTrack(s *discordgo.Session, i *discordgo.InteractionCreate, guildID, channelID, url string) error {
+	video, err := bot.youtubeAPI.GetVideoContext(context.Background(), url)
+	if err != nil {
+		return err
+	}
+
+	if err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("Playing %q...", video.Title)},
+	}); err != nil {
+		return err
+	}
+
+	bot.playQueue <- &Task{
+		video:     video,
+		guildID:   guildID,
+		channelID: channelID,
+	}
+
+	return nil
+}
+
 type Segment struct {
 	SeekHead *webm.SeekHead    `ebml:"SeekHead"`
 	Info     webm.Info         `ebml:"Info"`
@@ -60,81 +97,79 @@ type Container struct {
 	Segment Segment         `ebml:"Segment"`
 }
 
-// playSound plays the current buffer to the provided channel.
-func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url string) error {
-	client := youtube.Client{
-		Debug:      false,
-		HTTPClient: http.DefaultClient,
-	}
+func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
+	for {
+		var task *Task
 
-	video, err := client.GetVideoContext(context.Background(), url)
-	if err != nil {
-		return err
-	}
-	formats := video.Formats.WithAudioChannels().Type("opus")
-	//log.Println(formats)
-	format := &formats[0]
+		select {
+		case <-ctx.Done():
+			return nil
+		case task = <-bot.playQueue:
+		}
 
-	reader, _, err := client.GetStreamContext(context.Background(), video, format)
-	if err != nil {
-		return err
-	}
+		formats := task.video.Formats.WithAudioChannels().Type("opus")
+		//log.Println(formats)
+		format := &formats[0]
 
-	// Join the provided voice channel.
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
-	if err != nil {
-		return err
-	}
+		reader, _, err := bot.youtubeAPI.GetStreamContext(context.Background(), task.video, format)
+		if err != nil {
+			return err
+		}
 
-	// Sleep for a specified amount of time before playing the sound
-	time.Sleep(250 * time.Millisecond)
+		// Join the provided voice channel.
+		vc, err := bot.api.ChannelVoiceJoin(task.guildID, task.channelID, false, true)
+		if err != nil {
+			return err
+		}
 
-	// Start speaking.
-	vc.Speaking(true)
+		// Sleep for a specified amount of time before playing the sound
+		time.Sleep(250 * time.Millisecond)
 
-	// cluster's size is usually below about 175 000 bytes
-	clusterChan := make(chan webm.Cluster, 32)
+		// Start speaking.
+		vc.Speaking(true)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+		// cluster's size is usually below about 175 000 bytes
+		clusterChan := make(chan webm.Cluster, 32)
 
-	go func(clusterChan <-chan webm.Cluster) {
-		defer wg.Done()
-		for cluster := range clusterChan {
-			for _, block := range cluster.SimpleBlock {
-				for _, data := range block.Data {
-					if bot.PlayStatus {
-						vc.OpusSend <- data
-					} else {
-						<-bot.StartPlayback
+		var wg sync.WaitGroup
+		wg.Add(1)
+
+		go func(clusterChan <-chan webm.Cluster) {
+			defer wg.Done()
+			for cluster := range clusterChan {
+				for _, block := range cluster.SimpleBlock {
+					for _, data := range block.Data {
+						if bot.playStatus {
+							vc.OpusSend <- data
+						} else {
+							<-bot.startPlayback
+						}
 					}
 				}
 			}
+		}(clusterChan)
+
+		var container Container
+		container.Segment.Cluster = clusterChan
+
+		bufReader := bufio.NewReader(reader)
+		err = ebml.Unmarshal(bufReader, &container)
+		close(clusterChan)
+		if err != nil {
+			return fmt.Errorf("unmarshal error: %w", err)
 		}
-	}(clusterChan)
 
-	var container Container
-	container.Segment.Cluster = clusterChan
+		wg.Wait()
 
-	bufReader := bufio.NewReader(reader)
-	err = ebml.Unmarshal(bufReader, &container)
-	close(clusterChan)
-	if err != nil {
-		return fmt.Errorf("unmarshal error: %w", err)
+		// Stop speaking
+		vc.Speaking(false)
+
+		// Sleep for a specificed amount of time before ending.
+		time.Sleep(250 * time.Millisecond)
+
+		// Disconnect from the provided voice channel.
+		vc.Disconnect()
 	}
-
-	wg.Wait()
-
-	// Stop speaking
-	vc.Speaking(false)
-
-	// Sleep for a specificed amount of time before ending.
-	time.Sleep(250 * time.Millisecond)
-
-	// Disconnect from the provided voice channel.
-	vc.Disconnect()
-
-	return nil
 }
 
 func (bot *DiscoBot) guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
@@ -233,8 +268,8 @@ func (bot *DiscoBot) handleDisco(s *discordgo.Session, i *discordgo.InteractionC
 		// Look for the message sender in that guild's current voice states.
 		for _, vs := range g.VoiceStates {
 			if vs.UserID == i.Member.User.ID {
-				bot.PlayStatus = true
-				err = bot.playSound(s, g.ID, vs.ChannelID, url)
+				bot.playStatus = true
+				err = bot.queueTrack(s, i, g.ID, vs.ChannelID, url)
 				if err != nil {
 					return fmt.Errorf("error playing sound: %w", err)
 				}
@@ -260,7 +295,7 @@ func (bot *DiscoBot) handlePause(s *discordgo.Session, i *discordgo.InteractionC
 		return nil
 	}
 
-	bot.PlayStatus = false
+	bot.playStatus = false
 
 	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -273,10 +308,9 @@ func (bot *DiscoBot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCr
 		return nil
 	}
 
-	bot.PlayStatus = true
-	//bot.StartPlayback <- struct{}{}
+	bot.playStatus = true
 	select {
-	case bot.StartPlayback <- struct{}{}:
+	case bot.startPlayback <- struct{}{}:
 	default:
 		// skip if nobody is waiting
 	}
