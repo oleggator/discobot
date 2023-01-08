@@ -158,9 +158,9 @@ func (bot *DiscoBot) handleInteractionCreate(s disgord.Session, i *disgord.Inter
 		switch i.Data.Name {
 		case "disco":
 			err = bot.handleDisco(s, i)
-		case "unpause":
+		case "disco-play":
 			err = bot.handlePlay(s, i)
-		case "pause":
+		case "disco-pause":
 			err = bot.handlePause(s, i)
 		}
 
