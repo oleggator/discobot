@@ -4,47 +4,48 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"github.com/andersfylling/disgord"
+	"github.com/at-wat/ebml-go"
+	"github.com/at-wat/ebml-go/webm"
+	"github.com/kkdai/youtube/v2"
 	"log"
 	"net/http"
 	"sync"
-	"time"
-
-	"github.com/at-wat/ebml-go"
-	"github.com/at-wat/ebml-go/webm"
-	"github.com/bwmarrin/discordgo"
-	"github.com/kkdai/youtube/v2"
 )
 
 type DiscoBot struct {
-	api           *discordgo.Session
+	client        *disgord.Client
 	PlayStatus    bool
 	StartPlayback chan struct{}
 }
 
 func NewDiscoBot(token string) (*DiscoBot, error) {
-	dg, err := discordgo.New("Bot " + token)
-	if err != nil {
-		return nil, err
-	}
+	client := disgord.New(disgord.Config{
+		BotToken: token,
+		Intents:  disgord.IntentGuilds | disgord.IntentGuildMessages | disgord.IntentGuildVoiceStates,
+	})
 
 	bot := &DiscoBot{
-		api:           dg,
+		client:        client,
 		StartPlayback: make(chan struct{}),
 	}
 
-	dg.AddHandler(bot.guildCreate)
-	dg.AddHandler(bot.handleInteractionCreate)
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildVoiceStates
+	gateway := client.Gateway()
+	gateway.GuildCreate(bot.guildCreate)
+	gateway.InteractionCreate(bot.handleInteractionCreate)
+	gateway.BotReady(func() {
+		log.Println("bot is ready")
+	})
 
 	return bot, nil
 }
 
 func (bot *DiscoBot) Open() error {
-	return bot.api.Open()
+	return bot.client.Gateway().Connect()
 }
 
 func (bot *DiscoBot) Close() error {
-	return bot.api.Close()
+	return bot.client.Gateway().Disconnect()
 }
 
 type Segment struct {
@@ -61,7 +62,7 @@ type Container struct {
 }
 
 // playSound plays the current buffer to the provided channel.
-func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url string) error {
+func (bot *DiscoBot) playSound(guildID, channelID disgord.Snowflake, url string) error {
 	client := youtube.Client{
 		Debug:      false,
 		HTTPClient: http.DefaultClient,
@@ -81,16 +82,15 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 	}
 
 	// Join the provided voice channel.
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
+	voice, err := bot.client.Guild(guildID).VoiceChannel(channelID).Connect(false, true)
 	if err != nil {
 		return err
 	}
-
-	// Sleep for a specified amount of time before playing the sound
-	time.Sleep(250 * time.Millisecond)
+	defer voice.Close()
 
 	// Start speaking.
-	vc.Speaking(true)
+	voice.StartSpeaking()
+	defer voice.StopSpeaking()
 
 	// cluster's size is usually below about 175 000 bytes
 	clusterChan := make(chan webm.Cluster, 32)
@@ -104,7 +104,9 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 			for _, block := range cluster.SimpleBlock {
 				for _, data := range block.Data {
 					if bot.PlayStatus {
-						vc.OpusSend <- data
+						if err := voice.SendOpusFrame(data); err != nil {
+							return
+						}
 					} else {
 						<-bot.StartPlayback
 					}
@@ -125,151 +127,103 @@ func (bot *DiscoBot) playSound(s *discordgo.Session, guildID, channelID, url str
 
 	wg.Wait()
 
-	// Stop speaking
-	vc.Speaking(false)
-
-	// Sleep for a specificed amount of time before ending.
-	time.Sleep(250 * time.Millisecond)
-
-	// Disconnect from the provided voice channel.
-	vc.Disconnect()
-
 	return nil
 }
 
-func (bot *DiscoBot) guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
-	if event.Guild.Unavailable {
-		return
-	}
-
-	appID := s.State.User.ID
-	guildID := event.Guild.ID
-
-	cmds, err := s.ApplicationCommandBulkOverwrite(appID, guildID, []*discordgo.ApplicationCommand{
-		{
-			Name:        "disco",
-			Description: "Showcase of single autocomplete option",
-			Type:        discordgo.ChatApplicationCommand,
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Name:         "url",
-					Description:  "YouTube video URL",
-					Type:         discordgo.ApplicationCommandOptionString,
-					Required:     true,
-					Autocomplete: true,
-				},
+func (bot *DiscoBot) guildCreate(s disgord.Session, event *disgord.GuildCreate) {
+	var commands = []*disgord.CreateApplicationCommand{
+		{Name: "disco", Description: "play music", Options: []*disgord.ApplicationCommandOption{
+			{
+				Type:        disgord.OptionTypeString,
+				Name:        "url",
+				Description: "YouTube video URL",
+				Required:    true,
 			},
-		},
-		{
-			Name:        "disco-play",
-			Description: "Pause current song",
-			Type:        discordgo.ChatApplicationCommand,
-		},
-		{
-			Name:        "disco-pause",
-			Description: "Pause current song",
-			Type:        discordgo.ChatApplicationCommand,
-		},
-	})
-	if err != nil {
-		log.Println(err)
+		}},
+		{Name: "disco-play", Description: "unpause"},
+		{Name: "disco-pause", Description: "pause"},
 	}
 
-	s.AddHandlerOnce(func(s *discordgo.Session, event *discordgo.Disconnect) {
-		for _, cmd := range cmds {
-			err := s.ApplicationCommandDelete(appID, guildID, cmd.ID)
-			if err != nil {
-				log.Fatalf("Cannot delete %q command: %v", cmd.Name, err)
-			}
+	for i := range commands {
+		if err := bot.client.ApplicationCommand(0).Guild(event.Guild.ID).Create(commands[i]); err != nil {
+			log.Fatal(err)
 		}
-	})
-}
-
-func (bot *DiscoBot) handleInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	var err error
-
-	switch i.ApplicationCommandData().Name {
-	case "disco":
-		err = bot.handleDisco(s, i)
-	case "disco-play":
-		err = bot.handlePlay(s, i)
-	case "disco-pause":
-		err = bot.handlePause(s, i)
-	}
-
-	if err != nil {
-		log.Println(err)
 	}
 }
 
-func (bot *DiscoBot) handleDisco(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	switch i.Type {
-	case discordgo.InteractionApplicationCommand:
-		// Find the channel that the message came from.
-		c, err := s.State.Channel(i.ChannelID)
-		if err != nil {
-			// Could not find channel.
-			return err
+func (bot *DiscoBot) handleInteractionCreate(s disgord.Session, i *disgord.InteractionCreate) {
+	go func() {
+		var err error
+
+		switch i.Data.Name {
+		case "disco":
+			err = bot.handleDisco(s, i)
+		case "unpause":
+			err = bot.handlePlay(s, i)
+		case "pause":
+			err = bot.handlePause(s, i)
 		}
 
-		data := i.ApplicationCommandData()
-		url := data.Options[0].StringValue()
-
-		err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("Playing %q...", data.Options[0].StringValue())},
-		})
 		if err != nil {
-			return err
+			log.Println(err)
 		}
+	}()
+}
 
-		// Find the guild for that channel.
-		g, err := s.State.Guild(c.GuildID)
-		if err != nil {
-			// Could not find guild.
-			return err
-		}
+func (bot *DiscoBot) handleDisco(s disgord.Session, i *disgord.InteractionCreate) error {
+	if i.Type != disgord.InteractionApplicationCommand {
+		return nil
+	}
 
-		// Look for the message sender in that guild's current voice states.
-		for _, vs := range g.VoiceStates {
-			if vs.UserID == i.Member.User.ID {
-				bot.PlayStatus = true
-				err = bot.playSound(s, g.ID, vs.ChannelID, url)
-				if err != nil {
-					return fmt.Errorf("error playing sound: %w", err)
-				}
+	urlArg := i.Data.Options[0]
 
-				return nil
+	ch, err := s.Channel(i.ChannelID).Get()
+	if err != nil {
+		return err
+	}
+
+	guild, err := s.Guild(ch.GuildID).Get()
+	if err != nil {
+		return err
+	}
+
+	url := urlArg.Value.(string)
+
+	if err = s.SendInteractionResponse(context.Background(), i, &disgord.CreateInteractionResponse{
+		Type: disgord.InteractionCallbackChannelMessageWithSource,
+		Data: &disgord.CreateInteractionResponseData{Content: fmt.Sprintf("Playing %s...", url)},
+	}); err != nil {
+		return err
+	}
+
+	for _, vs := range guild.VoiceStates {
+		if vs.UserID == i.Member.UserID {
+			bot.PlayStatus = true
+			if err = bot.playSound(guild.ID, vs.ChannelID, url); err != nil {
+				return err
 			}
+			return err
 		}
-	case discordgo.InteractionApplicationCommandAutocomplete:
-		return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-			Data: &discordgo.InteractionResponseData{Choices: []*discordgo.ApplicationCommandOptionChoice{
-				{Name: "Rick Astley", Value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
-				{Name: "Short video", Value: "https://www.youtube.com/watch?v=LQxwqsoxXQI"},
-			}},
-		})
 	}
 
 	return nil
 }
 
-func (bot *DiscoBot) handlePause(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	if i.Type != discordgo.InteractionApplicationCommand {
+func (bot *DiscoBot) handlePause(s disgord.Session, i *disgord.InteractionCreate) error {
+	if i.Type != disgord.InteractionApplicationCommand {
 		return nil
 	}
 
 	bot.PlayStatus = false
 
-	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: "Paused..."},
+	return s.SendInteractionResponse(context.Background(), i, &disgord.CreateInteractionResponse{
+		Type: disgord.InteractionCallbackChannelMessageWithSource,
+		Data: &disgord.CreateInteractionResponseData{Content: "Paused..."},
 	})
 }
 
-func (bot *DiscoBot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	if i.Type != discordgo.InteractionApplicationCommand {
+func (bot *DiscoBot) handlePlay(s disgord.Session, i *disgord.InteractionCreate) error {
+	if i.Type != disgord.InteractionApplicationCommand {
 		return nil
 	}
 
@@ -281,8 +235,8 @@ func (bot *DiscoBot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCr
 		// skip if nobody is waiting
 	}
 
-	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: fmt.Sprintf("Playing...")},
+	return s.SendInteractionResponse(context.Background(), i, &disgord.CreateInteractionResponse{
+		Type: disgord.InteractionCallbackChannelMessageWithSource,
+		Data: &disgord.CreateInteractionResponseData{Content: "Playing..."},
 	})
 }
