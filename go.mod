@@ -3,7 +3,7 @@ module discobot
 go 1.19
 
 require (
-	github.com/andersfylling/disgord v0.36.0
+	github.com/andersfylling/disgord v0.36.2
 	github.com/at-wat/ebml-go v0.16.0
 	github.com/kkdai/youtube/v2 v2.7.18
 )
