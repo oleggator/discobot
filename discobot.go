@@ -4,30 +4,55 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"github.com/andersfylling/disgord"
+	dg "github.com/andersfylling/disgord"
 	"github.com/at-wat/ebml-go"
 	"github.com/at-wat/ebml-go/webm"
 	"github.com/kkdai/youtube/v2"
+	"golang.org/x/exp/slices"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 )
 
 type DiscoBot struct {
-	client        *disgord.Client
-	PlayStatus    bool
-	StartPlayback chan struct{}
+	client     *dg.Client
+	youtubeAPI *youtube.Client
+
+	playStatus    bool
+	startPlayback chan struct{}
+
+	playQueue chan *Task
+}
+
+type Task struct {
+	video              *youtube.Video
+	guildID, channelID dg.Snowflake
 }
 
 func NewDiscoBot(token string) (*DiscoBot, error) {
-	client := disgord.New(disgord.Config{
+	client := dg.New(dg.Config{
 		BotToken: token,
-		Intents:  disgord.IntentGuilds | disgord.IntentGuildMessages | disgord.IntentGuildVoiceStates,
+		Intents:  dg.IntentGuilds | dg.IntentGuildMessages | dg.IntentGuildVoiceStates,
 	})
+
+	dialer := net.Dialer{}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp4", addr)
+	}
+
+	youtubeAPI := &youtube.Client{
+		Debug:      false,
+		HTTPClient: &http.Client{Transport: transport},
+	}
 
 	bot := &DiscoBot{
 		client:        client,
-		StartPlayback: make(chan struct{}),
+		youtubeAPI:    youtubeAPI,
+		playStatus:    false,
+		startPlayback: make(chan struct{}),
+		playQueue:     make(chan *Task),
 	}
 
 	gateway := client.Gateway()
@@ -40,20 +65,36 @@ func NewDiscoBot(token string) (*DiscoBot, error) {
 	return bot, nil
 }
 
-func (bot *DiscoBot) Open() error {
-	return bot.client.Gateway().Connect()
+func (bot *DiscoBot) Open(ctx context.Context) error {
+	return bot.client.Gateway().WithContext(ctx).Connect()
 }
 
 func (bot *DiscoBot) Close() error {
 	return bot.client.Gateway().Disconnect()
 }
 
+func (bot *DiscoBot) queueTrack(ctx context.Context, guildID, channelID dg.Snowflake, url string) error {
+	video, err := bot.youtubeAPI.GetVideoContext(ctx, url)
+	if err != nil {
+		return err
+	}
+
+	bot.playQueue <- &Task{
+		video:     video,
+		guildID:   guildID,
+		channelID: channelID,
+	}
+
+	return nil
+}
+
 type Segment struct {
-	SeekHead *webm.SeekHead    `ebml:"SeekHead"`
-	Info     webm.Info         `ebml:"Info"`
-	Tracks   webm.Tracks       `ebml:"Tracks"`
-	Cues     *webm.Cues        `ebml:"Cues"`
-	Cluster  chan webm.Cluster `ebml:"Cluster"`
+	SeekHead *webm.SeekHead `ebml:"SeekHead"`
+	Info     webm.Info      `ebml:"Info"`
+	Tracks   webm.Tracks    `ebml:"Tracks"`
+	Cues     *webm.Cues     `ebml:"Cues"`
+
+	ClustersChan chan *webm.Cluster `ebml:"Cluster"`
 }
 
 type Container struct {
@@ -61,80 +102,79 @@ type Container struct {
 	Segment Segment         `ebml:"Segment"`
 }
 
-// playSound plays the current buffer to the provided channel.
-func (bot *DiscoBot) playSound(guildID, channelID disgord.Snowflake, url string) error {
-	client := youtube.Client{
-		Debug:      false,
-		HTTPClient: http.DefaultClient,
-	}
+func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
+	for {
+		var task *Task
 
-	video, err := client.GetVideoContext(context.Background(), url)
-	if err != nil {
-		return err
-	}
-	formats := video.Formats.WithAudioChannels().Type("opus")
-	//log.Println(formats)
-	format := &formats[0]
+		select {
+		case <-ctx.Done():
+			return nil
+		case task = <-bot.playQueue:
+		}
 
-	reader, _, err := client.GetStreamContext(context.Background(), video, format)
-	if err != nil {
-		return err
-	}
+		formats := task.video.Formats.WithAudioChannels().Type("opus")
+		formats.Sort()
+		format := &formats[0]
 
-	// Join the provided voice channel.
-	voice, err := bot.client.Guild(guildID).VoiceChannel(channelID).Connect(false, true)
-	if err != nil {
-		return err
-	}
-	defer voice.Close()
+		reader, _, err := bot.youtubeAPI.GetStreamContext(ctx, task.video, format)
+		if err != nil {
+			return err
+		}
 
-	// Start speaking.
-	voice.StartSpeaking()
-	defer voice.StopSpeaking()
+		// Join the provided voice channel.
+		voice, err := bot.client.Guild(task.guildID).VoiceChannel(task.channelID).Connect(false, true)
+		if err != nil {
+			return err
+		}
 
-	// cluster's size is usually below about 175 000 bytes
-	clusterChan := make(chan webm.Cluster, 32)
+		// Start speaking.
+		voice.StartSpeaking()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+		// cluster's size is usually below about 175 000 bytes
+		clusterChan := make(chan *webm.Cluster, 8192)
 
-	go func(clusterChan <-chan webm.Cluster) {
-		defer wg.Done()
-		for cluster := range clusterChan {
-			for _, block := range cluster.SimpleBlock {
-				for _, data := range block.Data {
-					if bot.PlayStatus {
-						if err := voice.SendOpusFrame(data); err != nil {
-							return
+		var wg sync.WaitGroup
+		wg.Add(1)
+
+		go func(clusterChan <-chan *webm.Cluster) {
+			defer wg.Done()
+			for cluster := range clusterChan {
+				for _, block := range cluster.SimpleBlock {
+					for _, data := range block.Data {
+						if bot.playStatus {
+							if err := voice.SendOpusFrame(data); err != nil {
+								return
+							}
+						} else {
+							<-bot.startPlayback
 						}
-					} else {
-						<-bot.StartPlayback
 					}
 				}
 			}
+		}(clusterChan)
+
+		var container Container
+		container.Segment.ClustersChan = clusterChan
+
+		bufReader := bufio.NewReader(reader)
+		err = ebml.Unmarshal(bufReader, &container)
+		close(clusterChan)
+		if err != nil {
+			log.Println("unmarshal error", err)
 		}
-	}(clusterChan)
 
-	var container Container
-	container.Segment.Cluster = clusterChan
+		wg.Wait()
 
-	bufReader := bufio.NewReader(reader)
-	err = ebml.Unmarshal(bufReader, &container)
-	close(clusterChan)
-	if err != nil {
-		return fmt.Errorf("unmarshal error: %w", err)
+		voice.StopSpeaking()
+		voice.Close()
 	}
-
-	wg.Wait()
-
-	return nil
 }
 
-func (bot *DiscoBot) guildCreate(s disgord.Session, event *disgord.GuildCreate) {
-	var commands = []*disgord.CreateApplicationCommand{
-		{Name: "disco", Description: "play music", Options: []*disgord.ApplicationCommandOption{
+func (bot *DiscoBot) guildCreate(s dg.Session, event *dg.GuildCreate) {
+	var commands = []*dg.CreateApplicationCommand{
+		{Name: "disco", Description: "play music", Options: []*dg.ApplicationCommandOption{
 			{
-				Type:        disgord.OptionTypeString,
+				Type:        dg.OptionTypeString,
 				Name:        "url",
 				Description: "YouTube video URL",
 				Required:    true,
@@ -151,7 +191,7 @@ func (bot *DiscoBot) guildCreate(s disgord.Session, event *disgord.GuildCreate) 
 	}
 }
 
-func (bot *DiscoBot) handleInteractionCreate(s disgord.Session, i *disgord.InteractionCreate) {
+func (bot *DiscoBot) handleInteractionCreate(s dg.Session, i *dg.InteractionCreate) {
 	go func() {
 		var err error
 
@@ -170,12 +210,13 @@ func (bot *DiscoBot) handleInteractionCreate(s disgord.Session, i *disgord.Inter
 	}()
 }
 
-func (bot *DiscoBot) handleDisco(s disgord.Session, i *disgord.InteractionCreate) error {
-	if i.Type != disgord.InteractionApplicationCommand {
+func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
+	if i.Type != dg.InteractionApplicationCommand {
 		return nil
 	}
 
 	urlArg := i.Data.Options[0]
+	url := urlArg.Value.(string)
 
 	ch, err := s.Channel(i.ChannelID).Get()
 	if err != nil {
@@ -187,56 +228,57 @@ func (bot *DiscoBot) handleDisco(s disgord.Session, i *disgord.InteractionCreate
 		return err
 	}
 
-	url := urlArg.Value.(string)
-
-	if err = s.SendInteractionResponse(context.Background(), i, &disgord.CreateInteractionResponse{
-		Type: disgord.InteractionCallbackChannelMessageWithSource,
-		Data: &disgord.CreateInteractionResponseData{Content: fmt.Sprintf("Playing %s...", url)},
-	}); err != nil {
-		return err
+	// Look for the message sender in that guild's current voice states.
+	vsIndex := slices.IndexFunc(guild.VoiceStates, func(vs *dg.VoiceState) bool {
+		return vs.UserID == i.Member.UserID
+	})
+	if vsIndex == -1 {
+		return fmt.Errorf("voice channel not found")
 	}
 
-	for _, vs := range guild.VoiceStates {
-		if vs.UserID == i.Member.UserID {
-			bot.PlayStatus = true
-			if err = bot.playSound(guild.ID, vs.ChannelID, url); err != nil {
-				return err
-			}
-			return err
-		}
+	bot.playStatus = true
+	err = bot.queueTrack(context.Background(), guild.ID, guild.VoiceStates[vsIndex].ChannelID, url)
+	if err != nil {
+		return fmt.Errorf("error playing sound: %w", err)
+	}
+
+	if err = s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
+		Type: dg.InteractionCallbackChannelMessageWithSource,
+		Data: &dg.CreateInteractionResponseData{Content: fmt.Sprintf("Added %s to the play queue", url)},
+	}); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (bot *DiscoBot) handlePause(s disgord.Session, i *disgord.InteractionCreate) error {
-	if i.Type != disgord.InteractionApplicationCommand {
+func (bot *DiscoBot) handlePause(s dg.Session, i *dg.InteractionCreate) error {
+	if i.Type != dg.InteractionApplicationCommand {
 		return nil
 	}
 
-	bot.PlayStatus = false
+	bot.playStatus = false
 
-	return s.SendInteractionResponse(context.Background(), i, &disgord.CreateInteractionResponse{
-		Type: disgord.InteractionCallbackChannelMessageWithSource,
-		Data: &disgord.CreateInteractionResponseData{Content: "Paused..."},
+	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
+		Type: dg.InteractionCallbackChannelMessageWithSource,
+		Data: &dg.CreateInteractionResponseData{Content: "Paused..."},
 	})
 }
 
-func (bot *DiscoBot) handlePlay(s disgord.Session, i *disgord.InteractionCreate) error {
-	if i.Type != disgord.InteractionApplicationCommand {
+func (bot *DiscoBot) handlePlay(s dg.Session, i *dg.InteractionCreate) error {
+	if i.Type != dg.InteractionApplicationCommand {
 		return nil
 	}
 
-	bot.PlayStatus = true
-	//bot.StartPlayback <- struct{}{}
+	bot.playStatus = true
 	select {
-	case bot.StartPlayback <- struct{}{}:
+	case bot.startPlayback <- struct{}{}:
 	default:
 		// skip if nobody is waiting
 	}
 
-	return s.SendInteractionResponse(context.Background(), i, &disgord.CreateInteractionResponse{
-		Type: disgord.InteractionCallbackChannelMessageWithSource,
-		Data: &disgord.CreateInteractionResponseData{Content: "Playing..."},
+	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
+		Type: dg.InteractionCallbackChannelMessageWithSource,
+		Data: &dg.CreateInteractionResponseData{Content: "Playing..."},
 	})
 }

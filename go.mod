@@ -1,11 +1,12 @@
 module discobot
 
-go 1.19
+go 1.20
 
 require (
 	github.com/andersfylling/disgord v0.36.2
 	github.com/at-wat/ebml-go v0.16.0
 	github.com/kkdai/youtube/v2 v2.7.18
+	golang.org/x/exp v0.0.0-20230321023759-10a507213a29
 )
 
 require (
