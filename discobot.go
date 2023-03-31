@@ -239,6 +239,10 @@ func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
 	bot.playStatus = true
 	err = bot.queueTrack(context.Background(), guild.ID, guild.VoiceStates[vsIndex].ChannelID, url)
 	if err != nil {
+		_ = s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
+			Type: dg.InteractionCallbackChannelMessageWithSource,
+			Data: &dg.CreateInteractionResponseData{Content: err.Error()},
+		})
 		return fmt.Errorf("error playing sound: %w", err)
 	}
 
