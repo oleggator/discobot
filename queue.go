@@ -7,15 +7,16 @@ import (
 
 type Queue[T any] struct {
 	playQueue chan T
+	capacity  int
 }
 
-func NewQueue[T any]() Queue[T] {
-	return Queue[T]{
-		playQueue: make(chan T, 32),
-	}
+func NewQueue[T any](capacity int) Queue[T] {
+	queue := Queue[T]{capacity: capacity}
+	queue.Clean()
+	return queue
 }
 
-func (pq *Queue[T]) Add(item T) error {
+func (pq *Queue[T]) Push(item T) error {
 	select {
 	case pq.playQueue <- item:
 	default:
@@ -24,23 +25,32 @@ func (pq *Queue[T]) Add(item T) error {
 	return nil
 }
 
-func (pq *Queue[T]) Get(ctx context.Context) (T, error) {
-	var item T
-	select {
-	case item = <-pq.playQueue:
-	case <-ctx.Done():
+func (pq *Queue[T]) Pop(ctx context.Context) (T, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			var empty T
+			return empty, ctx.Err()
+
+		case item, ok := <-pq.playQueue:
+			if !ok {
+				continue
+			}
+
+			return item, nil
+		}
 	}
-	return item, ctx.Err()
 }
 
 func (pq *Queue[T]) Clean() {
+	oldChan := pq.playQueue
+	pq.playQueue = make(chan T, pq.capacity)
 
+	if oldChan != nil {
+		close(oldChan)
+	}
 }
 
 func (pq *Queue[T]) Len() int {
 	return len(pq.playQueue)
-}
-
-func (pq *Queue[T]) String() string {
-	return ""
 }

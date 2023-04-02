@@ -37,7 +37,7 @@ func NewDiscoBot(token string) *DiscoBot {
 	bot := &DiscoBot{
 		client:    client,
 		playback:  NewPlayback(),
-		playQueue: NewQueue[*Task](),
+		playQueue: NewQueue[*Task](32),
 	}
 
 	gateway := client.Gateway()
@@ -68,7 +68,7 @@ func (bot *DiscoBot) queueTrack(ctx context.Context, guildID, channelID dg.Snowf
 		return err
 	}
 
-	if err := bot.playQueue.Add(&Task{
+	if err := bot.playQueue.Push(&Task{
 		video:     &video,
 		guildID:   guildID,
 		channelID: channelID,
@@ -96,7 +96,7 @@ type Container struct {
 func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 	var voice dg.VoiceConnection
 	for {
-		task, err := bot.playQueue.Get(ctx)
+		task, err := bot.playQueue.Pop(ctx)
 		if err != nil {
 			return err
 		}
@@ -187,7 +187,8 @@ func (bot *DiscoBot) guildCreate(s dg.Session, event *dg.GuildCreate) {
 		}},
 		{Name: "disco-play", Description: "unpause"},
 		{Name: "disco-pause", Description: "pause"},
-		{Name: "disco-skip", Description: "skip current track"},
+		{Name: "disco-skip", Description: "skip the current track"},
+		{Name: "disco-clean", Description: "clean the play queue"},
 	}
 
 	for i := range commands {
@@ -210,6 +211,8 @@ func (bot *DiscoBot) handleInteractionCreate(s dg.Session, i *dg.InteractionCrea
 			err = bot.handlePause(s, i)
 		case "disco-skip":
 			err = bot.handleSkip(s, i)
+		case "disco-clean":
+			err = bot.handleClean(s, i)
 		}
 
 		if err != nil {
@@ -297,6 +300,20 @@ func (bot *DiscoBot) handleSkip(s dg.Session, i *dg.InteractionCreate) error {
 
 	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
 		Type: dg.InteractionCallbackChannelMessageWithSource,
-		Data: &dg.CreateInteractionResponseData{Content: "Skip current track"},
+		Data: &dg.CreateInteractionResponseData{Content: "Skip the current track"},
+	})
+}
+
+func (bot *DiscoBot) handleClean(s dg.Session, i *dg.InteractionCreate) error {
+	if i.Type != dg.InteractionApplicationCommand {
+		return nil
+	}
+
+	bot.playQueue.Clean()
+	bot.playback.Skip()
+
+	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
+		Type: dg.InteractionCallbackChannelMessageWithSource,
+		Data: &dg.CreateInteractionResponseData{Content: "Clean the play queue"},
 	})
 }
