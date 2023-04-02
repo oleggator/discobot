@@ -7,17 +7,18 @@ import (
 	dg "github.com/andersfylling/disgord"
 	"github.com/at-wat/ebml-go"
 	"github.com/at-wat/ebml-go/webm"
-	"github.com/kkdai/youtube/v2"
+	"github.com/wader/goutubedl"
 	"golang.org/x/exp/slices"
+	"golang.org/x/sync/errgroup"
 	"log"
-	"net"
-	"net/http"
-	"sync"
 )
 
+func init() {
+	goutubedl.Path = "yt-dlp"
+}
+
 type DiscoBot struct {
-	client     *dg.Client
-	youtubeAPI *youtube.Client
+	client *dg.Client
 
 	playStatus    bool
 	startPlayback chan struct{}
@@ -26,30 +27,18 @@ type DiscoBot struct {
 }
 
 type Task struct {
-	video              *youtube.Video
+	video              *goutubedl.Result
 	guildID, channelID dg.Snowflake
 }
 
-func NewDiscoBot(token string) (*DiscoBot, error) {
+func NewDiscoBot(token string) *DiscoBot {
 	client := dg.New(dg.Config{
 		BotToken: token,
 		Intents:  dg.IntentGuilds | dg.IntentGuildMessages | dg.IntentGuildVoiceStates,
 	})
 
-	dialer := net.Dialer{}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return dialer.DialContext(ctx, "tcp4", addr)
-	}
-
-	youtubeAPI := &youtube.Client{
-		Debug:      false,
-		HTTPClient: &http.Client{Transport: transport},
-	}
-
 	bot := &DiscoBot{
 		client:        client,
-		youtubeAPI:    youtubeAPI,
 		playStatus:    false,
 		startPlayback: make(chan struct{}),
 		playQueue:     make(chan *Task, 32),
@@ -62,7 +51,7 @@ func NewDiscoBot(token string) (*DiscoBot, error) {
 		log.Println("bot is ready")
 	})
 
-	return bot, nil
+	return bot
 }
 
 func (bot *DiscoBot) Open(ctx context.Context) error {
@@ -74,13 +63,17 @@ func (bot *DiscoBot) Close() error {
 }
 
 func (bot *DiscoBot) queueTrack(ctx context.Context, guildID, channelID dg.Snowflake, url string) error {
-	video, err := bot.youtubeAPI.GetVideoContext(ctx, url)
+	video, err := goutubedl.New(ctx, url, goutubedl.Options{
+		Type:              goutubedl.TypeSingle,
+		DownloadThumbnail: false,
+		DownloadSubtitles: false,
+	})
 	if err != nil {
 		return err
 	}
 
 	bot.playQueue <- &Task{
-		video:     video,
+		video:     &video,
 		guildID:   guildID,
 		channelID: channelID,
 	}
@@ -104,70 +97,86 @@ type Container struct {
 
 func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 	for {
-		var task *Task
-
 		select {
 		case <-ctx.Done():
 			return nil
-		case task = <-bot.playQueue:
+		case task := <-bot.playQueue:
+			if err := bot.play(ctx, task); err != nil {
+				log.Println(err)
+			}
 		}
+	}
+}
 
-		formats := task.video.Formats.WithAudioChannels().Type("opus")
-		formats.Sort()
-		format := &formats[0]
+func (bot *DiscoBot) play(ctx context.Context, task *Task) error {
+	// cluster's size is usually below about 175 000 bytes
+	clusterChan := make(chan *webm.Cluster, 32)
 
-		reader, _, err := bot.youtubeAPI.GetStreamContext(ctx, task.video, format)
-		if err != nil {
-			return err
-		}
-
+	eg, ctx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
 		// Join the provided voice channel.
 		voice, err := bot.client.Guild(task.guildID).VoiceChannel(task.channelID).Connect(false, true)
 		if err != nil {
 			return err
 		}
+		defer voice.Close()
 
 		// Start speaking.
 		voice.StartSpeaking()
+		defer voice.StopSpeaking()
 
-		// cluster's size is usually below about 175 000 bytes
-		clusterChan := make(chan *webm.Cluster, 8192)
+		for cluster := range clusterChan {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 
-		var wg sync.WaitGroup
-		wg.Add(1)
+			for _, block := range cluster.SimpleBlock {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 
-		go func(clusterChan <-chan *webm.Cluster) {
-			defer wg.Done()
-			for cluster := range clusterChan {
-				for _, block := range cluster.SimpleBlock {
-					for _, data := range block.Data {
-						if bot.playStatus {
-							if err := voice.SendOpusFrame(data); err != nil {
-								return
-							}
-						} else {
-							<-bot.startPlayback
+				for _, data := range block.Data {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+
+					if !bot.playStatus {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-bot.startPlayback:
 						}
+					}
+
+					if err := voice.SendOpusFrame(data); err != nil {
+						return err
 					}
 				}
 			}
-		}(clusterChan)
+		}
+
+		return nil
+	})
+	eg.Go(func() error {
+		reader, err := task.video.Download(ctx, "251")
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
 
 		var container Container
 		container.Segment.ClustersChan = clusterChan
 
-		bufReader := bufio.NewReader(reader)
-		err = ebml.Unmarshal(bufReader, &container)
+		err = ebml.Unmarshal(bufio.NewReader(reader), &container)
 		close(clusterChan)
 		if err != nil {
-			log.Println("unmarshal error", err)
+			return fmt.Errorf("unmarshal error: %w", err)
 		}
 
-		wg.Wait()
+		return nil
+	})
 
-		voice.StopSpeaking()
-		voice.Close()
-	}
+	return eg.Wait()
 }
 
 func (bot *DiscoBot) guildCreate(s dg.Session, event *dg.GuildCreate) {

@@ -14,10 +14,7 @@ var token = os.Getenv("TOKEN")
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	bot, err := NewDiscoBot(token)
-	if err != nil {
-		log.Fatalln(err)
-	}
+	bot := NewDiscoBot(token)
 	if err := bot.Open(ctx); err != nil {
 		log.Fatalln(err)
 	}
