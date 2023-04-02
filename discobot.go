@@ -52,7 +52,7 @@ func NewDiscoBot(token string) (*DiscoBot, error) {
 		youtubeAPI:    youtubeAPI,
 		playStatus:    false,
 		startPlayback: make(chan struct{}),
-		playQueue:     make(chan *Task),
+		playQueue:     make(chan *Task, 32),
 	}
 
 	gateway := client.Gateway()
