@@ -20,7 +20,7 @@ func init() {
 type DiscoBot struct {
 	client    *dg.Client
 	playback  Playback
-	playQueue chan *Task
+	playQueue Queue[*Task]
 }
 
 type Task struct {
@@ -37,7 +37,7 @@ func NewDiscoBot(token string) *DiscoBot {
 	bot := &DiscoBot{
 		client:    client,
 		playback:  NewPlayback(),
-		playQueue: make(chan *Task, 32),
+		playQueue: NewQueue[*Task](),
 	}
 
 	gateway := client.Gateway()
@@ -68,14 +68,12 @@ func (bot *DiscoBot) queueTrack(ctx context.Context, guildID, channelID dg.Snowf
 		return err
 	}
 
-	select {
-	case bot.playQueue <- &Task{
+	if err := bot.playQueue.Add(&Task{
 		video:     &video,
 		guildID:   guildID,
 		channelID: channelID,
-	}:
-	default:
-		return fmt.Errorf("queue is full")
+	}); err != nil {
+		return err
 	}
 
 	return nil
@@ -97,28 +95,27 @@ type Container struct {
 
 func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 	var voice dg.VoiceConnection
-	var err error
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case task := <-bot.playQueue:
-			if voice == nil {
-				// Join the provided voice channel.
-				voice, err = bot.client.Guild(task.guildID).VoiceChannel(task.channelID).Connect(false, true)
-				if err != nil {
-					return err
-				}
-			}
+		task, err := bot.playQueue.Get(ctx)
+		if err != nil {
+			return err
+		}
 
-			if err := bot.play(ctx, voice, task); err != nil {
-				log.Println(err)
+		if voice == nil {
+			// Join the provided voice channel.
+			voice, err = bot.client.Guild(task.guildID).VoiceChannel(task.channelID).Connect(false, true)
+			if err != nil {
+				return err
 			}
+		}
 
-			if len(bot.playQueue) == 0 {
-				voice.Close()
-				voice = nil
-			}
+		if err := bot.play(ctx, voice, task); err != nil {
+			log.Println(err)
+		}
+
+		if bot.playQueue.Len() == 0 {
+			voice.Close()
+			voice = nil
 		}
 	}
 }
