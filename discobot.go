@@ -18,11 +18,8 @@ func init() {
 }
 
 type DiscoBot struct {
-	client *dg.Client
-
-	playStatus    bool
-	startPlayback chan struct{}
-
+	client    *dg.Client
+	playback  Playback
 	playQueue chan *Task
 }
 
@@ -38,10 +35,9 @@ func NewDiscoBot(token string) *DiscoBot {
 	})
 
 	bot := &DiscoBot{
-		client:        client,
-		playStatus:    false,
-		startPlayback: make(chan struct{}),
-		playQueue:     make(chan *Task, 32),
+		client:    client,
+		playback:  NewPlayback(),
+		playQueue: make(chan *Task, 32),
 	}
 
 	gateway := client.Gateway()
@@ -72,10 +68,14 @@ func (bot *DiscoBot) queueTrack(ctx context.Context, guildID, channelID dg.Snowf
 		return err
 	}
 
-	bot.playQueue <- &Task{
+	select {
+	case bot.playQueue <- &Task{
 		video:     &video,
 		guildID:   guildID,
 		channelID: channelID,
+	}:
+	default:
+		return fmt.Errorf("queue is full")
 	}
 
 	return nil
@@ -96,31 +96,39 @@ type Container struct {
 }
 
 func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
+	var voice dg.VoiceConnection
+	var err error
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case task := <-bot.playQueue:
-			if err := bot.play(ctx, task); err != nil {
+			if voice == nil {
+				// Join the provided voice channel.
+				voice, err = bot.client.Guild(task.guildID).VoiceChannel(task.channelID).Connect(false, true)
+				if err != nil {
+					return err
+				}
+			}
+
+			if err := bot.play(ctx, voice, task); err != nil {
 				log.Println(err)
+			}
+
+			if len(bot.playQueue) == 0 {
+				voice.Close()
+				voice = nil
 			}
 		}
 	}
 }
 
-func (bot *DiscoBot) play(ctx context.Context, task *Task) error {
+func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *Task) error {
 	// cluster's size is usually below about 175 000 bytes
 	clusterChan := make(chan *webm.Cluster, 32)
 
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
-		// Join the provided voice channel.
-		voice, err := bot.client.Guild(task.guildID).VoiceChannel(task.channelID).Connect(false, true)
-		if err != nil {
-			return err
-		}
-		defer voice.Close()
-
 		// Start speaking.
 		voice.StartSpeaking()
 		defer voice.StopSpeaking()
@@ -136,18 +144,9 @@ func (bot *DiscoBot) play(ctx context.Context, task *Task) error {
 				}
 
 				for _, data := range block.Data {
-					if ctx.Err() != nil {
-						return ctx.Err()
+					if err := bot.playback.Check(ctx); err != nil {
+						return err
 					}
-
-					if !bot.playStatus {
-						select {
-						case <-ctx.Done():
-							return ctx.Err()
-						case <-bot.startPlayback:
-						}
-					}
-
 					if err := voice.SendOpusFrame(data); err != nil {
 						return err
 					}
@@ -191,6 +190,7 @@ func (bot *DiscoBot) guildCreate(s dg.Session, event *dg.GuildCreate) {
 		}},
 		{Name: "disco-play", Description: "unpause"},
 		{Name: "disco-pause", Description: "pause"},
+		{Name: "disco-skip", Description: "skip current track"},
 	}
 
 	for i := range commands {
@@ -211,6 +211,8 @@ func (bot *DiscoBot) handleInteractionCreate(s dg.Session, i *dg.InteractionCrea
 			err = bot.handlePlay(s, i)
 		case "disco-pause":
 			err = bot.handlePause(s, i)
+		case "disco-skip":
+			err = bot.handleSkip(s, i)
 		}
 
 		if err != nil {
@@ -224,8 +226,7 @@ func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
 		return nil
 	}
 
-	urlArg := i.Data.Options[0]
-	url := urlArg.Value.(string)
+	url := i.Data.Options[0].Value.(string)
 
 	ch, err := s.Channel(i.ChannelID).Get()
 	if err != nil {
@@ -245,7 +246,6 @@ func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
 		return fmt.Errorf("voice channel not found")
 	}
 
-	bot.playStatus = true
 	err = bot.queueTrack(context.Background(), guild.ID, guild.VoiceStates[vsIndex].ChannelID, url)
 	if err != nil {
 		_ = s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
@@ -270,7 +270,7 @@ func (bot *DiscoBot) handlePause(s dg.Session, i *dg.InteractionCreate) error {
 		return nil
 	}
 
-	bot.playStatus = false
+	bot.playback.Pause()
 
 	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
 		Type: dg.InteractionCallbackChannelMessageWithSource,
@@ -283,15 +283,23 @@ func (bot *DiscoBot) handlePlay(s dg.Session, i *dg.InteractionCreate) error {
 		return nil
 	}
 
-	bot.playStatus = true
-	select {
-	case bot.startPlayback <- struct{}{}:
-	default:
-		// skip if nobody is waiting
-	}
+	bot.playback.Play()
 
 	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
 		Type: dg.InteractionCallbackChannelMessageWithSource,
 		Data: &dg.CreateInteractionResponseData{Content: "Playing..."},
+	})
+}
+
+func (bot *DiscoBot) handleSkip(s dg.Session, i *dg.InteractionCreate) error {
+	if i.Type != dg.InteractionApplicationCommand {
+		return nil
+	}
+
+	bot.playback.Skip()
+
+	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
+		Type: dg.InteractionCallbackChannelMessageWithSource,
+		Data: &dg.CreateInteractionResponseData{Content: "Skip current track"},
 	})
 }
