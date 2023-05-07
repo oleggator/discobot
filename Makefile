@@ -15,6 +15,9 @@ status:
 logs:
 	fly logs
 
+deploy:
+	fly deploy
+
 build:
 	mkdir -p build
 	GOOS=linux go build -o build/discobot discobot
