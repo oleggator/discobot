@@ -199,26 +199,24 @@ func (bot *DiscoBot) guildCreate(s dg.Session, event *dg.GuildCreate) {
 }
 
 func (bot *DiscoBot) handleInteractionCreate(s dg.Session, i *dg.InteractionCreate) {
-	go func() {
-		var err error
+	var err error
 
-		switch i.Data.Name {
-		case "disco":
-			err = bot.handleDisco(s, i)
-		case "disco-play":
-			err = bot.handlePlay(s, i)
-		case "disco-pause":
-			err = bot.handlePause(s, i)
-		case "disco-skip":
-			err = bot.handleSkip(s, i)
-		case "disco-clean":
-			err = bot.handleClean(s, i)
-		}
+	switch i.Data.Name {
+	case "disco":
+		err = bot.handleDisco(s, i)
+	case "disco-play":
+		err = bot.handlePlay(s, i)
+	case "disco-pause":
+		err = bot.handlePause(s, i)
+	case "disco-skip":
+		err = bot.handleSkip(s, i)
+	case "disco-clean":
+		err = bot.handleClean(s, i)
+	}
 
-		if err != nil {
-			log.Println(err)
-		}
-	}()
+	if err != nil {
+		log.Println(err)
+	}
 }
 
 func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
