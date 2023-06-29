@@ -5,7 +5,6 @@ go 1.20
 require (
 	github.com/andersfylling/disgord v0.36.2
 	github.com/at-wat/ebml-go v0.17.0
-	github.com/wader/goutubedl v0.0.0-20230622161522-3d23796f5fe5
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
 	golang.org/x/sync v0.3.0
 )

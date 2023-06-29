@@ -4,8 +4,8 @@
 
 ## Requirements
 
-- \>=1 core cpu
-- \>=128 mb ram
+- 1 core cpu
+- 128 mb ram
 
 ## Dependencies
 

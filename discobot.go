@@ -1,21 +1,18 @@
 package main
 
 import (
-	"bufio"
 	"context"
+	"discobot/ytdlp"
 	"fmt"
+	"io"
+	"log"
+
 	dg "github.com/andersfylling/disgord"
 	"github.com/at-wat/ebml-go"
 	"github.com/at-wat/ebml-go/webm"
-	"github.com/wader/goutubedl"
 	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
-	"log"
 )
-
-func init() {
-	goutubedl.Path = "yt-dlp"
-}
 
 type DiscoBot struct {
 	client    *dg.Client
@@ -24,7 +21,7 @@ type DiscoBot struct {
 }
 
 type Task struct {
-	video              *goutubedl.Result
+	video              *ytdlp.FetchResult
 	guildID, channelID dg.Snowflake
 }
 
@@ -59,17 +56,13 @@ func (bot *DiscoBot) Close() error {
 }
 
 func (bot *DiscoBot) queueTrack(ctx context.Context, guildID, channelID dg.Snowflake, url string) error {
-	video, err := goutubedl.New(ctx, url, goutubedl.Options{
-		Type:              goutubedl.TypeSingle,
-		DownloadThumbnail: false,
-		DownloadSubtitles: false,
-	})
+	video, err := ytdlp.Fetch(ctx, url)
 	if err != nil {
 		return err
 	}
 
 	if err := bot.playQueue.Push(&Task{
-		video:     &video,
+		video:     video,
 		guildID:   guildID,
 		channelID: channelID,
 	}); err != nil {
@@ -123,6 +116,7 @@ func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *Task) error {
 	// cluster's size is usually below about 175 000 bytes
 	clusterChan := make(chan *webm.Cluster, 32)
+	r, w := io.Pipe()
 
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
@@ -154,16 +148,18 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 		return nil
 	})
 	eg.Go(func() error {
-		reader, err := task.video.Download(ctx, "251")
-		if err != nil {
+		if err := task.video.Download(ctx, w); err != nil {
 			return err
 		}
-		defer reader.Close()
-
+		w.Close()
+		return nil
+	})
+	eg.Go(func() error {
 		var container Container
 		container.Segment.ClustersChan = clusterChan
 
-		err = ebml.Unmarshal(bufio.NewReader(reader), &container)
+		err := ebml.Unmarshal(r, &container)
+		r.Close()
 		close(clusterChan)
 		if err != nil {
 			return fmt.Errorf("unmarshal error: %w", err)

@@ -3,3 +3,4 @@
 *.webm
 *.opus
 /build
+.env
