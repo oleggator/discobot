@@ -10,14 +10,14 @@ import (
 	dg "github.com/andersfylling/disgord"
 	"github.com/at-wat/ebml-go"
 	"github.com/at-wat/ebml-go/webm"
-	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
 )
 
 type DiscoBot struct {
-	client    *dg.Client
-	playback  Playback
-	playQueue Queue[*Task]
+	client            *dg.Client
+	playback          Playback
+	playQueue         Queue[*Task]
+	channelIDByUserID map[dg.Snowflake]dg.Snowflake
 }
 
 type Task struct {
@@ -32,9 +32,10 @@ func NewDiscoBot(token string) *DiscoBot {
 	})
 
 	bot := &DiscoBot{
-		client:    client,
-		playback:  NewPlayback(),
-		playQueue: NewQueue[*Task](32),
+		client:            client,
+		playback:          NewPlayback(),
+		playQueue:         NewQueue[*Task](32),
+		channelIDByUserID: make(map[dg.Snowflake]dg.Snowflake),
 	}
 
 	gateway := client.Gateway()
@@ -42,6 +43,14 @@ func NewDiscoBot(token string) *DiscoBot {
 	gateway.InteractionCreate(bot.handleInteractionCreate)
 	gateway.BotReady(func() {
 		log.Println("bot is ready")
+	})
+
+	gateway.VoiceStateUpdate(func(s dg.Session, h *dg.VoiceStateUpdate) {
+		if channelID := h.VoiceState.ChannelID; !channelID.IsZero() {
+			bot.channelIDByUserID[h.VoiceState.UserID] = h.VoiceState.ChannelID
+		} else {
+			delete(bot.channelIDByUserID, h.VoiceState.UserID)
+		}
 	})
 
 	return bot
@@ -148,20 +157,20 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 		return nil
 	})
 	eg.Go(func() error {
+		defer w.Close()
 		if err := task.video.Download(ctx, w); err != nil {
 			return err
 		}
-		w.Close()
+
 		return nil
 	})
 	eg.Go(func() error {
+		defer close(clusterChan)
+		defer r.Close()
+
 		var container Container
 		container.Segment.ClustersChan = clusterChan
-
-		err := ebml.Unmarshal(r, &container)
-		r.Close()
-		close(clusterChan)
-		if err != nil {
+		if err := ebml.Unmarshal(r, &container); err != nil {
 			return fmt.Errorf("unmarshal error: %w", err)
 		}
 
@@ -172,6 +181,12 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 }
 
 func (bot *DiscoBot) guildCreate(s dg.Session, event *dg.GuildCreate) {
+	voiceStates := event.Guild.VoiceStates
+	for _, vs := range voiceStates {
+		userID := vs.UserID
+		bot.channelIDByUserID[userID] = vs.ChannelID
+	}
+
 	var commands = []*dg.CreateApplicationCommand{
 		{Name: "disco", Description: "play music", Options: []*dg.ApplicationCommandOption{
 			{
@@ -222,26 +237,8 @@ func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
 
 	url := i.Data.Options[0].Value.(string)
 
-	ch, err := s.Channel(i.ChannelID).Get()
-	if err != nil {
-		return err
-	}
-
-	guild, err := s.Guild(ch.GuildID).Get()
-	if err != nil {
-		return err
-	}
-
-	// Look for the message sender in that guild's current voice states.
-	vsIndex := slices.IndexFunc(guild.VoiceStates, func(vs *dg.VoiceState) bool {
-		return vs.UserID == i.Member.UserID
-	})
-	if vsIndex == -1 {
-		return fmt.Errorf("voice channel not found")
-	}
-
-	err = bot.queueTrack(context.Background(), guild.ID, guild.VoiceStates[vsIndex].ChannelID, url)
-	if err != nil {
+	channelID := bot.channelIDByUserID[i.Member.UserID]
+	if err := bot.queueTrack(context.Background(), i.GuildID, channelID, url); err != nil {
 		_ = s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
 			Type: dg.InteractionCallbackChannelMessageWithSource,
 			Data: &dg.CreateInteractionResponseData{Content: err.Error()},
@@ -249,7 +246,7 @@ func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
 		return fmt.Errorf("error playing sound: %w", err)
 	}
 
-	if err = s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
+	if err := s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
 		Type: dg.InteractionCallbackChannelMessageWithSource,
 		Data: &dg.CreateInteractionResponseData{Content: fmt.Sprintf("Added %s to the play queue", url)},
 	}); err != nil {
