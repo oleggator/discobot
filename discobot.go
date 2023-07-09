@@ -129,6 +129,12 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
+		defer func() {
+			for range clusterChan {
+				// drain channel
+			}
+		}()
+
 		// Start speaking.
 		voice.StartSpeaking()
 		defer voice.StopSpeaking()
