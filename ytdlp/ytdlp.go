@@ -34,10 +34,11 @@ func Fetch(ctx context.Context, url string) (*FetchResult, error) {
 	)
 
 	var infoBuf bytes.Buffer
+	var errBuf bytes.Buffer
 
 	metadataCmd.Stdin = strings.NewReader(url)
 	metadataCmd.Stdout = &infoBuf
-	metadataCmd.Stderr = os.Stderr
+	metadataCmd.Stderr = &errBuf
 
 	if err := metadataCmd.Run(); err != nil {
 		return nil, err
@@ -48,8 +49,11 @@ func Fetch(ctx context.Context, url string) (*FetchResult, error) {
 	}, nil
 }
 
-func (fr *FetchResult) Download(ctx context.Context, w io.Writer) error {
-	ffmpegStdin, ytDlpStdout := io.Pipe()
+func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
+	ffmpegStdin, ytDlpStdout, err := os.Pipe()
+	if err != nil {
+		return err
+	}
 
 	ffmpegCmd := exec.CommandContext(
 		ctx,
@@ -60,9 +64,13 @@ func (fr *FetchResult) Download(ctx context.Context, w io.Writer) error {
 		"-f", "webm",
 		"pipe:",
 	)
+	ffmpegCmd.Cancel = func() error {
+		defer w.Close()
+		return ffmpegCmd.Process.Signal(os.Interrupt)
+	}
 	ffmpegCmd.Stdin = ffmpegStdin
 	ffmpegCmd.Stdout = w
-	ffmpegCmd.Stderr = os.Stderr
+	ffmpegCmd.Stderr = io.Discard
 
 	ytDlpCmd := exec.CommandContext(
 		ctx,
@@ -79,9 +87,12 @@ func (fr *FetchResult) Download(ctx context.Context, w io.Writer) error {
 		"--format-sort", "aext:opus",
 		"-o", "-",
 	)
+	ytDlpCmd.Cancel = func() error {
+		return ytDlpCmd.Process.Signal(os.Interrupt)
+	}
 	ytDlpCmd.Stdin = bytes.NewReader(fr.rawInfo)
 	ytDlpCmd.Stdout = ytDlpStdout
-	ytDlpCmd.Stderr = os.Stderr
+	ytDlpCmd.Stderr = io.Discard
 
 	if err := ffmpegCmd.Start(); err != nil {
 		return err
@@ -90,10 +101,16 @@ func (fr *FetchResult) Download(ctx context.Context, w io.Writer) error {
 		return err
 	}
 
-	_ = ytDlpCmd.Wait()
+	ytDlpErr := ytDlpCmd.Wait()
 	ytDlpStdout.Close()
+	ffmpegErr := ffmpegCmd.Wait()
 
-	_ = ffmpegCmd.Wait()
+	if ytDlpErr != nil {
+		return ytDlpErr
+	}
+	if ffmpegErr != nil {
+		return ffmpegErr
+	}
 
-	return nil
+	return ctx.Err()
 }
