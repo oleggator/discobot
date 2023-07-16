@@ -4,3 +4,4 @@
 *.opus
 /build
 .env
+.vscode
