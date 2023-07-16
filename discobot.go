@@ -10,8 +10,11 @@ import (
 	dg "github.com/andersfylling/disgord"
 	"github.com/at-wat/ebml-go"
 	"github.com/at-wat/ebml-go/webm"
+	"golang.org/x/exp/slog"
 	"golang.org/x/sync/errgroup"
 )
+
+var logger = slog.Default()
 
 type DiscoBot struct {
 	client            *dg.Client
@@ -42,7 +45,7 @@ func NewDiscoBot(token string) *DiscoBot {
 	gateway.GuildCreate(bot.guildCreate)
 	gateway.InteractionCreate(bot.handleInteractionCreate)
 	gateway.BotReady(func() {
-		log.Println("bot is ready")
+		logger.Info("bot is ready")
 	})
 
 	gateway.VoiceStateUpdate(func(s dg.Session, h *dg.VoiceStateUpdate) {
@@ -112,7 +115,7 @@ func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 		}
 
 		if err := bot.play(ctx, voice, task); err != nil {
-			log.Println(err)
+			logger.Error("", err)
 		}
 
 		if bot.playQueue.Len() == 0 {
@@ -130,9 +133,13 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		defer func() {
-			for range clusterChan {
-				// drain channel
-			}
+			go func() {
+				for range clusterChan {
+					// drain channel
+				}
+			}()
+
+			logger.Info("player stopped")
 		}()
 
 		// Start speaking.
@@ -160,10 +167,15 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 			}
 		}
 
+		logger.Info("player exited with nil")
+
 		return nil
 	})
 	eg.Go(func() error {
-		defer w.Close()
+		defer func() {
+			w.Close()
+			logger.Info("downloader stopped")
+		}()
 		if err := task.video.Download(ctx, w); err != nil {
 			return err
 		}
@@ -171,8 +183,11 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 		return nil
 	})
 	eg.Go(func() error {
-		defer close(clusterChan)
-		defer r.Close()
+		defer func() {
+			close(clusterChan)
+			r.Close()
+			logger.Info("decoder stopped")
+		}()
 
 		var container Container
 		container.Segment.ClustersChan = clusterChan
@@ -232,7 +247,7 @@ func (bot *DiscoBot) handleInteractionCreate(s dg.Session, i *dg.InteractionCrea
 	}
 
 	if err != nil {
-		log.Println(err)
+		logger.Error("", err)
 	}
 }
 

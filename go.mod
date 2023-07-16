@@ -10,10 +10,10 @@ require (
 
 require (
 	github.com/andersfylling/snowflake/v5 v5.0.1 // indirect
-	github.com/google/go-cmp v0.5.8 // indirect
 	github.com/klauspost/compress v1.16.6 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/crypto v0.10.0 // indirect
+	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
 	golang.org/x/net v0.11.0 // indirect
 	golang.org/x/sys v0.9.0 // indirect
 	nhooyr.io/websocket v1.8.7 // indirect
