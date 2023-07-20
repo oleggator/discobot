@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
+	"discobot/ogg/opus"
 	"discobot/ytdlp"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 
 	dg "github.com/andersfylling/disgord"
-	"github.com/at-wat/ebml-go"
-	"github.com/at-wat/ebml-go/webm"
 	"golang.org/x/exp/slog"
 	"golang.org/x/sync/errgroup"
 )
@@ -84,20 +84,6 @@ func (bot *DiscoBot) queueTrack(ctx context.Context, guildID, channelID dg.Snowf
 	return nil
 }
 
-type Segment struct {
-	SeekHead *webm.SeekHead `ebml:"SeekHead"`
-	Info     webm.Info      `ebml:"Info"`
-	Tracks   webm.Tracks    `ebml:"Tracks"`
-	Cues     *webm.Cues     `ebml:"Cues"`
-
-	ClustersChan chan *webm.Cluster `ebml:"Cluster"`
-}
-
-type Container struct {
-	Header  webm.EBMLHeader `ebml:"EBML"`
-	Segment Segment         `ebml:"Segment"`
-}
-
 func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 	var voice dg.VoiceConnection
 	for {
@@ -127,18 +113,12 @@ func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 
 func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *Task) error {
 	// cluster's size is usually below about 175 000 bytes
-	clusterChan := make(chan *webm.Cluster, 32)
+	clusterChan := make(chan []byte, 32)
 	r, w := io.Pipe()
 
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		defer func() {
-			go func() {
-				for range clusterChan {
-					// drain channel
-				}
-			}()
-
 			logger.Info("player stopped")
 		}()
 
@@ -146,24 +126,12 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 		voice.StartSpeaking()
 		defer voice.StopSpeaking()
 
-		for cluster := range clusterChan {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		for data := range clusterChan {
+			if err := bot.playback.Check(ctx); err != nil {
+				return err
 			}
-
-			for _, block := range cluster.SimpleBlock {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-
-				for _, data := range block.Data {
-					if err := bot.playback.Check(ctx); err != nil {
-						return err
-					}
-					if err := voice.SendOpusFrame(data); err != nil {
-						return err
-					}
-				}
+			if err := voice.SendOpusFrame(data); err != nil {
+				return err
 			}
 		}
 
@@ -189,10 +157,30 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 			logger.Info("decoder stopped")
 		}()
 
-		var container Container
-		container.Segment.ClustersChan = clusterChan
-		if err := ebml.Unmarshal(r, &container); err != nil {
-			return fmt.Errorf("unmarshal error: %w", err)
+		d, err := opus.NewOpusDecoder(r)
+		if err != nil {
+			return err
+		}
+		for {
+			packetReader, err := d.NextPacket()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+
+			packet, err := io.ReadAll(packetReader)
+			if err != nil {
+				return err
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case clusterChan <- packet:
+			}
+
 		}
 
 		return nil

@@ -61,7 +61,7 @@ func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
 		"-i", "pipe:",
 		"-vn",
 		"-acodec", "libopus",
-		"-f", "webm",
+		"-f", "ogg",
 		"pipe:",
 	)
 	ffmpegCmd.Cancel = func() error {
