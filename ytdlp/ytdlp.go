@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -50,28 +51,6 @@ func Fetch(ctx context.Context, url string) (*FetchResult, error) {
 }
 
 func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
-	ffmpegStdin, ytDlpStdout, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-
-	ffmpegCmd := exec.CommandContext(
-		ctx,
-		ffmpegPath,
-		"-i", "pipe:",
-		"-vn",
-		"-acodec", "libopus",
-		"-f", "ogg",
-		"pipe:",
-	)
-	ffmpegCmd.Cancel = func() error {
-		defer w.Close()
-		return ffmpegCmd.Process.Signal(os.Interrupt)
-	}
-	ffmpegCmd.Stdin = ffmpegStdin
-	ffmpegCmd.Stdout = w
-	ffmpegCmd.Stderr = io.Discard
-
 	ytDlpCmd := exec.CommandContext(
 		ctx,
 		ytDlpPath,
@@ -85,31 +64,52 @@ func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
 		// https://github.com/yt-dlp/yt-dlp/issues/979#issuecomment-919629354
 		"-f", "ba/ba*",
 		"--format-sort", "aext:opus",
-		"-o", "-",
+		"-g",
 	)
 	ytDlpCmd.Cancel = func() error {
 		return ytDlpCmd.Process.Signal(os.Interrupt)
 	}
+
+	var buf bytes.Buffer
 	ytDlpCmd.Stdin = bytes.NewReader(fr.rawInfo)
-	ytDlpCmd.Stdout = ytDlpStdout
+	ytDlpCmd.Stdout = &buf
 	ytDlpCmd.Stderr = io.Discard
 
-	if err := ffmpegCmd.Start(); err != nil {
-		return err
-	}
-	if err := ytDlpCmd.Start(); err != nil {
+	if err := ytDlpCmd.Run(); err != nil {
 		return err
 	}
 
-	ytDlpErr := ytDlpCmd.Wait()
-	ytDlpStdout.Close()
-	ffmpegErr := ffmpegCmd.Wait()
-
-	if ytDlpErr != nil {
-		return ytDlpErr
+	resultURL, err := url.ParseRequestURI(strings.TrimSpace(buf.String()))
+	if err != nil {
+		return err
 	}
-	if ffmpegErr != nil {
-		return ffmpegErr
+
+	if err := downloadOpus(ctx, resultURL, w); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func downloadOpus(ctx context.Context, fileURL *url.URL, w io.WriteCloser) error {
+	ffmpegCmd := exec.CommandContext(
+		ctx,
+		ffmpegPath,
+		"-i", fileURL.String(),
+		"-vn",
+		"-acodec", "libopus",
+		"-f", "ogg",
+		"pipe:",
+	)
+	ffmpegCmd.Cancel = func() error {
+		defer w.Close()
+		return ffmpegCmd.Process.Signal(os.Interrupt)
+	}
+	ffmpegCmd.Stdout = w
+	ffmpegCmd.Stderr = io.Discard
+
+	if err := ffmpegCmd.Run(); err != nil {
+		return err
 	}
 
 	return ctx.Err()
