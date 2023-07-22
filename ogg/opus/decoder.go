@@ -9,11 +9,8 @@ import (
 	"io"
 )
 
-// little endian (really)
 var endian = binary.LittleEndian
 
-// https://datatracker.ietf.org/doc/html/rfc7845.html#section-3
-// https://datatracker.ietf.org/doc/html/rfc7845.html#section-5
 type OpusDecorder struct {
 	pd *ogg.PacketDecoder
 

@@ -120,11 +120,8 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
-		defer func() {
-			logger.Info("player stopped")
-		}()
+		defer logger.Info("player stopped")
 
-		// Start speaking.
 		voice.StartSpeaking()
 		defer voice.StopSpeaking()
 
@@ -136,8 +133,6 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 				return err
 			}
 		}
-
-		logger.Info("player exited with nil")
 
 		return nil
 	})
@@ -159,33 +154,7 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 			logger.Info("decoder stopped")
 		}()
 
-		d, err := opus.NewOpusDecoder(r)
-		if err != nil {
-			return err
-		}
-		for {
-			packetReader, err := d.NextPacket()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return err
-			}
-
-			packet, err := io.ReadAll(packetReader)
-			if err != nil {
-				return err
-			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case packetChan <- packet:
-			}
-
-		}
-
-		return nil
+		return decodeOpusToChan(ctx, r, packetChan)
 	})
 
 	return eg.Wait()
@@ -318,4 +287,33 @@ func (bot *DiscoBot) handleClean(s dg.Session, i *dg.InteractionCreate) error {
 		Type: dg.InteractionCallbackChannelMessageWithSource,
 		Data: &dg.CreateInteractionResponseData{Content: "Clean the play queue"},
 	})
+}
+
+func decodeOpusToChan(ctx context.Context, r io.Reader, ch chan<- []byte) error {
+	d, err := opus.NewOpusDecoder(r)
+	if err != nil {
+		return err
+	}
+	for {
+		packetReader, err := d.NextPacket()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		packet, err := io.ReadAll(packetReader)
+		if err != nil {
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ch <- packet:
+		}
+	}
+
+	return nil
 }
