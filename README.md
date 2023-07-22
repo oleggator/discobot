@@ -13,11 +13,4 @@
 - ffmpeg
 
 ## Docker image is compilable for the next platforms
-
-- x86_64
-- x86
-- aarch64
-- armhf
-- s390x
-- armv7
-- ppc64le
+x86_64, x86, aarch64, armhf, s390x, armv7, ppc64le

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"discobot"
 )
 
 var token = os.Getenv("TOKEN")
@@ -14,21 +16,23 @@ var token = os.Getenv("TOKEN")
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	bot := NewDiscoBot(token)
+	bot := discobot.NewDiscoBot(token)
 	if err := bot.Open(ctx); err != nil {
 		log.Fatalln(err)
 	}
 	defer bot.Close()
 
 	go func() {
-		if err := bot.RunPlayer(ctx); err != nil {
-			log.Println(err)
-		}
+		sc := make(chan os.Signal, 1)
+		signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
+
+		fmt.Println("Press CTRL-C to exit.")
+
+		<-sc
+		cancel()
 	}()
 
-	fmt.Println("Press CTRL-C to exit.")
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
-	<-sc
-	cancel()
+	if err := bot.RunPlayer(ctx); err != nil {
+		log.Println(err)
+	}
 }
