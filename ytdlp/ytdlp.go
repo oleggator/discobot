@@ -50,7 +50,7 @@ func Fetch(ctx context.Context, url string) (*FetchResult, error) {
 	}, nil
 }
 
-func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
+func (fr *FetchResult) Download(ctx context.Context) (io.ReadCloser, error) {
 	ytDlpCmd := exec.CommandContext(
 		ctx,
 		ytDlpPath,
@@ -76,22 +76,23 @@ func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
 	ytDlpCmd.Stderr = io.Discard
 
 	if err := ytDlpCmd.Run(); err != nil {
-		return err
+		return nil, err
 	}
 
 	resultURL, err := url.ParseRequestURI(strings.TrimSpace(buf.String()))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if err := downloadOpus(ctx, resultURL, w); err != nil {
-		return err
+	reader, err := downloadOpus(ctx, resultURL)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil
+	return reader, nil
 }
 
-func downloadOpus(ctx context.Context, fileURL *url.URL, w io.WriteCloser) error {
+func downloadOpus(ctx context.Context, fileURL *url.URL) (io.ReadCloser, error) {
 	ffmpegCmd := exec.CommandContext(
 		ctx,
 		ffmpegPath,
@@ -102,15 +103,18 @@ func downloadOpus(ctx context.Context, fileURL *url.URL, w io.WriteCloser) error
 		"pipe:",
 	)
 	ffmpegCmd.Cancel = func() error {
-		defer w.Close()
 		return ffmpegCmd.Process.Signal(os.Interrupt)
 	}
-	ffmpegCmd.Stdout = w
 	ffmpegCmd.Stderr = io.Discard
 
-	if err := ffmpegCmd.Run(); err != nil {
-		return err
+	stdoutReader, err := ffmpegCmd.StdoutPipe()
+	if err != nil {
+		return nil, err
 	}
 
-	return ctx.Err()
+	if err := ffmpegCmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return stdoutReader, ctx.Err()
 }

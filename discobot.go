@@ -115,8 +115,7 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 	bot.playback.StartCurrentTrack()
 	defer bot.playback.FinishCurrentTrack()
 
-	packetChan := make(chan []byte, 32)
-	r, w := io.Pipe()
+	packetChan := make(chan []byte, 2048)
 
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
@@ -138,21 +137,14 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 	})
 	eg.Go(func() error {
 		defer func() {
-			w.Close()
-			logger.Info("downloader stopped")
-		}()
-		if err := task.video.Download(ctx, w); err != nil {
-			return err
-		}
-
-		return nil
-	})
-	eg.Go(func() error {
-		defer func() {
 			close(packetChan)
-			r.Close()
 			logger.Info("decoder stopped")
 		}()
+
+		r, err := task.video.Download(ctx)
+		if err != nil {
+			return err
+		}
 
 		return decodeOpusToChan(ctx, r, packetChan)
 	})
