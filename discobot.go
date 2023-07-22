@@ -112,8 +112,10 @@ func (bot *DiscoBot) RunPlayer(ctx context.Context) error {
 }
 
 func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *Task) error {
-	// cluster's size is usually below about 175 000 bytes
-	clusterChan := make(chan []byte, 32)
+	bot.playback.StartCurrentTrack()
+	defer bot.playback.FinishCurrentTrack()
+
+	packetChan := make(chan []byte, 32)
 	r, w := io.Pipe()
 
 	eg, ctx := errgroup.WithContext(ctx)
@@ -126,11 +128,11 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 		voice.StartSpeaking()
 		defer voice.StopSpeaking()
 
-		for data := range clusterChan {
+		for packet := range packetChan {
 			if err := bot.playback.Check(ctx); err != nil {
 				return err
 			}
-			if err := voice.SendOpusFrame(data); err != nil {
+			if err := voice.SendOpusFrame(packet); err != nil {
 				return err
 			}
 		}
@@ -152,7 +154,7 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 	})
 	eg.Go(func() error {
 		defer func() {
-			close(clusterChan)
+			close(packetChan)
 			r.Close()
 			logger.Info("decoder stopped")
 		}()
@@ -178,7 +180,7 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case clusterChan <- packet:
+			case packetChan <- packet:
 			}
 
 		}
@@ -283,7 +285,7 @@ func (bot *DiscoBot) handlePlay(s dg.Session, i *dg.InteractionCreate) error {
 		return nil
 	}
 
-	bot.playback.Play()
+	bot.playback.Resume()
 
 	return s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
 		Type: dg.InteractionCallbackChannelMessageWithSource,

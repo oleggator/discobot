@@ -5,22 +5,34 @@ import (
 	"errors"
 )
 
+type PlayStatus int
+
+const (
+	IdlePlayStatus PlayStatus = iota
+	PlayingPlayStatus
+	PausedPlayStatus
+)
+
 type Playback struct {
-	playStatus    bool
+	playStatus    PlayStatus
 	startPlayback chan struct{}
 	skipCurrent   chan struct{}
 }
 
 func NewPlayback() Playback {
 	return Playback{
-		playStatus:    true,
+		playStatus:    IdlePlayStatus,
 		startPlayback: make(chan struct{}),
 		skipCurrent:   make(chan struct{}, 1),
 	}
 }
 
-func (pb *Playback) Play() {
-	pb.playStatus = true
+func (pb *Playback) Resume() {
+	if pb.playStatus != PausedPlayStatus {
+		return
+	}
+
+	pb.playStatus = PlayingPlayStatus
 	select {
 	case pb.startPlayback <- struct{}{}:
 	default:
@@ -28,11 +40,27 @@ func (pb *Playback) Play() {
 	}
 }
 
+func (pb *Playback) StartCurrentTrack() {
+	pb.playStatus = PlayingPlayStatus
+}
+
+func (pb *Playback) FinishCurrentTrack() {
+	pb.playStatus = IdlePlayStatus
+}
+
 func (pb *Playback) Pause() {
-	pb.playStatus = false
+	if pb.playStatus != PlayingPlayStatus {
+		return
+	}
+
+	pb.playStatus = PausedPlayStatus
 }
 
 func (pb *Playback) Skip() {
+	if pb.playStatus == IdlePlayStatus {
+		return
+	}
+
 	select {
 	case pb.skipCurrent <- struct{}{}:
 	default:
@@ -45,7 +73,7 @@ func (pb *Playback) Check(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	if !pb.playStatus {
+	if pb.playStatus != PlayingPlayStatus {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
