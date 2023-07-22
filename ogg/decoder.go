@@ -1,7 +1,6 @@
 package ogg
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -40,7 +39,7 @@ type PageDecoder struct {
 }
 
 func NewPageDecoder(r io.Reader) PageDecoder {
-	return PageDecoder{r: bufio.NewReader(r)}
+	return PageDecoder{r: r}
 }
 
 func (d *PageDecoder) NextPage() (*Page, error) {
