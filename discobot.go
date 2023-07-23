@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 
 	dg "github.com/andersfylling/disgord"
 	"golang.org/x/exp/slog"
@@ -117,6 +118,11 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 
 	packetChan := make(chan []byte, 2048)
 
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		defer logger.Info("player stopped")
@@ -137,14 +143,21 @@ func (bot *DiscoBot) play(ctx context.Context, voice dg.VoiceConnection, task *T
 	})
 	eg.Go(func() error {
 		defer func() {
-			close(packetChan)
-			logger.Info("decoder stopped")
+			w.Close()
+			logger.Info("downloader stopped")
 		}()
-
-		r, err := task.video.Download(ctx)
-		if err != nil {
+		if err := task.video.Download(ctx, w); err != nil {
 			return err
 		}
+
+		return nil
+	})
+	eg.Go(func() error {
+		defer func() {
+			close(packetChan)
+			r.Close()
+			logger.Info("decoder stopped")
+		}()
 
 		return decodeOpusToChan(ctx, r, packetChan)
 	})

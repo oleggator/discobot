@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -49,8 +48,29 @@ func Fetch(ctx context.Context, url string) (*FetchResult, error) {
 		rawInfo: infoBuf.Bytes(),
 	}, nil
 }
+func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
+	ffmpegStdin, ytDlpStdout, err := os.Pipe()
+	if err != nil {
+		return err
+	}
 
-func (fr *FetchResult) Download(ctx context.Context) (io.ReadCloser, error) {
+	ffmpegCmd := exec.CommandContext(
+		ctx,
+		ffmpegPath,
+		"-i", "pipe:",
+		"-vn",
+		"-acodec", "libopus",
+		"-f", "ogg",
+		"pipe:",
+	)
+	ffmpegCmd.Cancel = func() error {
+		defer w.Close()
+		return ffmpegCmd.Process.Signal(os.Interrupt)
+	}
+	ffmpegCmd.Stdin = ffmpegStdin
+	ffmpegCmd.Stdout = w
+	ffmpegCmd.Stderr = io.Discard
+
 	ytDlpCmd := exec.CommandContext(
 		ctx,
 		ytDlpPath,
@@ -60,61 +80,35 @@ func (fr *FetchResult) Download(ctx context.Context) (io.ReadCloser, error) {
 		"--newline",
 		"--restrict-filenames",
 		"--load-info", "-",
-		"-x",
 		// https://github.com/yt-dlp/yt-dlp/issues/979#issuecomment-919629354
 		"-f", "ba/ba*",
 		"--format-sort", "aext:opus",
-		"-g",
+		"-o", "-",
 	)
 	ytDlpCmd.Cancel = func() error {
 		return ytDlpCmd.Process.Signal(os.Interrupt)
 	}
-
-	var buf bytes.Buffer
 	ytDlpCmd.Stdin = bytes.NewReader(fr.rawInfo)
-	ytDlpCmd.Stdout = &buf
+	ytDlpCmd.Stdout = ytDlpStdout
 	ytDlpCmd.Stderr = io.Discard
 
-	if err := ytDlpCmd.Run(); err != nil {
-		return nil, err
-	}
-
-	resultURL, err := url.ParseRequestURI(strings.TrimSpace(buf.String()))
-	if err != nil {
-		return nil, err
-	}
-
-	reader, err := downloadOpus(ctx, resultURL)
-	if err != nil {
-		return nil, err
-	}
-
-	return reader, nil
-}
-
-func downloadOpus(ctx context.Context, fileURL *url.URL) (io.ReadCloser, error) {
-	ffmpegCmd := exec.CommandContext(
-		ctx,
-		ffmpegPath,
-		"-i", fileURL.String(),
-		"-vn",
-		"-acodec", "libopus",
-		"-f", "ogg",
-		"pipe:",
-	)
-	ffmpegCmd.Cancel = func() error {
-		return ffmpegCmd.Process.Signal(os.Interrupt)
-	}
-	ffmpegCmd.Stderr = io.Discard
-
-	stdoutReader, err := ffmpegCmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-
 	if err := ffmpegCmd.Start(); err != nil {
-		return nil, err
+		return err
+	}
+	if err := ytDlpCmd.Start(); err != nil {
+		return err
 	}
 
-	return stdoutReader, ctx.Err()
+	ytDlpErr := ytDlpCmd.Wait()
+	ytDlpStdout.Close()
+	ffmpegErr := ffmpegCmd.Wait()
+
+	if ytDlpErr != nil {
+		return ytDlpErr
+	}
+	if ffmpegErr != nil {
+		return ffmpegErr
+	}
+
+	return ctx.Err()
 }
