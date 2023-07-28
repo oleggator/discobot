@@ -222,7 +222,10 @@ func (bot *DiscoBot) handleDisco(s dg.Session, i *dg.InteractionCreate) error {
 
 	url := i.Data.Options[0].Value.(string)
 
-	channelID := bot.channelIDByUserID[i.Member.UserID]
+	channelID, found := bot.channelIDByUserID[i.Member.UserID]
+	if !found {
+		return fmt.Errorf("user \"%s\" is not in the voice channel", i.Member.Nick)
+	}
 	if err := bot.queueTrack(context.Background(), i.GuildID, channelID, url); err != nil {
 		_ = s.SendInteractionResponse(context.Background(), i, &dg.CreateInteractionResponse{
 			Type: dg.InteractionCallbackChannelMessageWithSource,
