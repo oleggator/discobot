@@ -20,7 +20,7 @@ docker build -t discobot .
 
 ### Without Docker
 
-## Prerequisites
+#### Prerequisites
 - Go 1.20
 - yt-dlp
 - ffmpeg
