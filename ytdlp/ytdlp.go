@@ -69,7 +69,7 @@ func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
 	}
 	ffmpegCmd.Stdin = ffmpegStdin
 	ffmpegCmd.Stdout = w
-	ffmpegCmd.Stderr = io.Discard
+	// ffmpegCmd.Stderr = io.Discard
 
 	ytDlpCmd := exec.CommandContext(
 		ctx,
@@ -90,7 +90,7 @@ func (fr *FetchResult) Download(ctx context.Context, w io.WriteCloser) error {
 	}
 	ytDlpCmd.Stdin = bytes.NewReader(fr.rawInfo)
 	ytDlpCmd.Stdout = ytDlpStdout
-	ytDlpCmd.Stderr = io.Discard
+	// ytDlpCmd.Stderr = io.Discard
 
 	if err := ffmpegCmd.Start(); err != nil {
 		return err
